@@ -1,5 +1,4 @@
-          # WDTT — WireGuard over TURN Tunnel
-      <img width="512" height="512" alt="ic_launcher-playstore" src="https://github.com/user-attachments/assets/946d5151-f596-4315-bae8-784bdbeef4ad" />
+# WDTT — WireGuard over TURN Tunnel
 
 <div align="center">
 
@@ -86,7 +85,7 @@ WDTT прокладывает WireGuard-туннель **внутри** DTLS-с�
 **[GNU General Public License v3.0](LICENSE)**
 
 ---
-<img width="2000" height="2000" alt="Blank 4 Grids Collage" src="https://github.com/user-attachments/assets/ee693b76-f5ea-4fc9-8044-26d6fd02c8bb" />
+<img width="2000" height="1078" alt="Blank 4 Grids Collage (1)" src="https://github.com/user-attachments/assets/8f65f9d9-4873-4ad5-941c-f3abd8a50d9a" />
 
 **Сделано для свободного интернета** 🕊
 
