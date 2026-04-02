@@ -11,6 +11,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Tag
+
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -37,6 +39,13 @@ import android.os.Build
 
 private const val WORKERS_PER_GROUP = 8
 
+// Coffee theme colors for protocol chips
+private val CoffeeBrown = Color(0xFF6D4C41)
+private val DarkCoffee = Color(0xFF3E2723)
+private val SoftLatte = Color(0xFFD7CCC8)
+private val WarmMocha = Color(0xFF8D6E63)
+private val CreamBeige = Color(0xFFF5F0EB)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsTab() {
@@ -47,6 +56,7 @@ fun SettingsTab() {
     val savedPeer by settingsStore.peer.collectAsStateWithLifecycle(initialValue = "")
     val savedVkHashes by settingsStore.vkHashes.collectAsStateWithLifecycle(initialValue = "")
     val savedWorkersPerHash by settingsStore.workersPerHash.collectAsStateWithLifecycle(initialValue = 16)
+    val savedProtocol by settingsStore.protocol.collectAsStateWithLifecycle(initialValue = "udp")
     val savedListenPort by settingsStore.listenPort.collectAsStateWithLifecycle(initialValue = 9000)
     val savedSni by settingsStore.sni.collectAsStateWithLifecycle(initialValue = "")
     
@@ -55,6 +65,7 @@ fun SettingsTab() {
 
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
     val activeWorkers by TunnelManager.activeWorkers.collectAsStateWithLifecycle()
+
 
     var cooldownSeconds by remember { mutableIntStateOf(0) }
     var wasRunning by remember { mutableStateOf(false) }
@@ -71,28 +82,65 @@ fun SettingsTab() {
     }
 
     var peerInput by rememberSaveable { mutableStateOf("") }
-    var vkHashesInput by rememberSaveable { mutableStateOf("") }
-    var workersInput by rememberSaveable { mutableFloatStateOf(64f) }
+    var vkHash1 by rememberSaveable { mutableStateOf("") }
+    var vkHash2 by rememberSaveable { mutableStateOf("") }
+    var vkHash3 by rememberSaveable { mutableStateOf("") }
+    var workersInput by rememberSaveable { mutableFloatStateOf(24f) }
+    var useTcp by rememberSaveable { mutableStateOf(false) }
+    var showHashesDialog by rememberSaveable { mutableStateOf(false) }
+
+    val allHashes = listOf(vkHash1, vkHash2, vkHash3)
+    val validHashes = allHashes.filter { it.isNotBlank() && it.length >= 16 }
+    val uniqueHashes = validHashes.distinct()
+    val filledHashCount = uniqueHashes.size
+    val combinedHashes = uniqueHashes.joinToString(",")
+    val dynamicMaxWorkers = (filledHashCount.coerceAtLeast(1) * 24).toFloat()
     var portInput by rememberSaveable { mutableStateOf("9000") }
     var sniInput by rememberSaveable { mutableStateOf("") }
 
-    val currentWorkers = workersInput
+    // Авто-клэмп: если убрали хеш и воркеров стало больше макс — снизить
+    LaunchedEffect(dynamicMaxWorkers) {
+        if (workersInput > dynamicMaxWorkers) {
+            workersInput = dynamicMaxWorkers
+        }
+    }
+
+    val currentWorkers = workersInput.coerceIn(WORKERS_PER_GROUP.toFloat(), dynamicMaxWorkers)
+
+    // Проверка ошибок хешей (per-field)
+    val hashErrors = buildList {
+        allHashes.forEachIndexed { i, h ->
+            if (h.isNotBlank() && h.length < 16) add("Хеш ${i + 1} — короткий")
+        }
+        // Проверка дублей
+        val filled = allHashes.filter { it.isNotBlank() && it.length >= 16 }
+        if (filled.size != filled.distinct().size) add("Есть дубликаты хешей")
+    }
+    val hasInputHashErrors = hashErrors.isNotEmpty()
 
     // Состояние модального окна секретов
     var showSecretsDialog by rememberSaveable { mutableStateOf(false) }
 
-    var initialized by rememberSaveable { mutableStateOf(false) }
+    var initialized by remember { mutableStateOf(false) }
 
-    LaunchedEffect(savedPeer, savedVkHashes, savedWorkersPerHash, savedListenPort, savedSni) {
+    fun parseHashes(raw: String) {
+        val parts = raw.split(Regex("[,\\s\\n]+")).map { stripVkUrlStatic(it) }.filter { it.isNotEmpty() }
+        vkHash1 = parts.getOrElse(0) { "" }
+        vkHash2 = parts.getOrElse(1) { "" }
+        vkHash3 = parts.getOrElse(2) { "" }
+    }
+
+    LaunchedEffect(savedPeer, savedVkHashes, savedWorkersPerHash, savedProtocol, savedListenPort, savedSni) {
         if (!initialized) {
             val hasData = savedPeer.isNotEmpty() || savedVkHashes.isNotEmpty() ||
                     savedWorkersPerHash != 16 || savedSni.isNotEmpty()
             if (hasData) {
                 peerInput = savedPeer
-                vkHashesInput = savedVkHashes
-                workersInput = roundToGroup(savedWorkersPerHash.toFloat())
+                parseHashes(savedVkHashes)
+                workersInput = roundToGroup(savedWorkersPerHash.toFloat(), (listOf(vkHash1, vkHash2, vkHash3).count { it.isNotBlank() }.coerceAtLeast(1) * 32).toFloat())
                 portInput = savedListenPort.toString()
                 sniInput = savedSni
+                useTcp = savedProtocol == "tcp"
                 initialized = true
             }
         }
@@ -102,10 +150,11 @@ fun SettingsTab() {
         delay(500)
         if (!initialized) {
             peerInput = savedPeer
-            vkHashesInput = savedVkHashes
-            workersInput = roundToGroup(savedWorkersPerHash.toFloat())
+            parseHashes(savedVkHashes)
+            workersInput = roundToGroup(savedWorkersPerHash.toFloat(), (listOf(vkHash1, vkHash2, vkHash3).count { it.isNotBlank() }.coerceAtLeast(1) * 32).toFloat())
             portInput = savedListenPort.toString()
             sniInput = savedSni
+            useTcp = savedProtocol == "tcp"
             initialized = true
         }
     }
@@ -117,8 +166,8 @@ fun SettingsTab() {
         saveJob = scope.launch {
             delay(300)
             settingsStore.save(
-                peerInput, vkHashesInput, "",
-                workersInput.toInt(), "udp", 9000, sniInput, false
+                peerInput, combinedHashes, "",
+                workersInput.toInt(), if (useTcp) "tcp" else "udp", 9000, sniInput, false
             )
         }
     }
@@ -126,10 +175,10 @@ fun SettingsTab() {
     val scrollState = rememberScrollState()
 
     val isPeerValid = peerInput.isNotBlank() && !peerInput.contains(":")
-    val isHashesValid = vkHashesInput.isNotBlank()
-    val isValid = isPeerValid && isHashesValid && savedConnectionPassword.isNotBlank()
+    val isHashesValid = combinedHashes.isNotBlank()
+    val isValid = isPeerValid && isHashesValid && savedConnectionPassword.isNotBlank() && !hasInputHashErrors
 
-
+    // ═══ Модальное окно секретов ═══
     if (showSecretsDialog) {
         SecretsDialog(
             settingsStore = settingsStore,
@@ -138,22 +187,39 @@ fun SettingsTab() {
         )
     }
 
+    // ═══ Модальное окно хешей ═══
+    if (showHashesDialog) {
+        HashesDialog(
+            hash1 = vkHash1,
+            hash2 = vkHash2,
+            hash3 = vkHash3,
+            onSave = { h1, h2, h3 ->
+                vkHash1 = h1
+                vkHash2 = h2
+                vkHash3 = h3
+                scheduleSave()
+            },
+            onDismiss = { showHashesDialog = false }
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(scrollState)
             .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // ═══ Статус бар (как в DeployTab — одинаковый стиль) ═══
         if (tunnelRunning) {
             Surface(
-                modifier = Modifier.fillMaxWidth().height(40.dp),
-                color = Color(0xFF4CAF50).copy(alpha = 0.15f),
+                modifier = Modifier.fillMaxWidth(),
+                color = Color(0xFF4CAF50).copy(alpha = 0.12f),
                 shape = RoundedCornerShape(12.dp),
                 border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF4CAF50).copy(alpha = 0.3f))
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 12.dp),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.Center
                 ) {
@@ -161,20 +227,28 @@ fun SettingsTab() {
                         imageVector = Icons.Default.Check,
                         contentDescription = null,
                         tint = Color(0xFF2E7D32),
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = "Активно (Потоков: $activeWorkers / ${currentWorkers.toInt()})",
-                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
                         color = Color(0xFF2E7D32)
                     )
                 }
             }
         }
+        
 
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("Настройки туннеля", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+
+        // ═══ Настройки туннеля (шрифты как в DeployTab) ═══
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "Настройки туннеля", 
+                style = MaterialTheme.typography.titleMedium, 
+                color = MaterialTheme.colorScheme.primary, 
+                fontWeight = FontWeight.SemiBold
+            )
 
             OutlinedTextField(
                 value = peerInput,
@@ -182,13 +256,12 @@ fun SettingsTab() {
                     peerInput = it.filter { c -> c != ' ' }
                     scheduleSave()
                 },
-                label = { Text("IP сервера (без порта)", fontSize = 12.sp) },
-                placeholder = { Text("1.2.3.4") },
+                label = { Text("IP сервера или домен (без порта)") },
+                placeholder = { Text("1.2.3.4 (или test.com)") },
                 singleLine = true,
                 isError = !isPeerValid && peerInput.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                shape = RoundedCornerShape(16.dp),
+                shape = RoundedCornerShape(12.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = MaterialTheme.colorScheme.primary,
                     unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
@@ -197,45 +270,61 @@ fun SettingsTab() {
                 )
             )
 
-            OutlinedTextField(
-                value = vkHashesInput,
-                onValueChange = {
-                    vkHashesInput = it
-                    scheduleSave()
-                },
-                label = { Text("VK Хеш", fontSize = 12.sp) },
-                placeholder = { Text("hash1") },
-                singleLine = true,
-                isError = !isHashesValid && vkHashesInput.isNotEmpty(),
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                    focusedContainerColor = MaterialTheme.colorScheme.surface,
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surface
+            // Кнопка "Хеши" → открывает модалку
+            OutlinedButton(
+                onClick = { showHashesDialog = true },
+                modifier = Modifier.fillMaxWidth().height(56.dp),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                ),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (hasInputHashErrors) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
                 )
-            )
+            ) {
+                Icon(Icons.Default.Tag, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Настройка VK Хешей", fontWeight = FontWeight.SemiBold)
+            }
+
+            // Ошибки хешей (дубли и тд)
+            val errorTexts = hashErrors.filter { !it.contains("короткий") }
+            if (errorTexts.isNotEmpty()) {
+                Text(
+                    text = "⚠️ ${errorTexts.joinToString(", ")}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
         }
 
+        // ═══ Мощность ═══
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("Мощность", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+            Text(
+                "Мощность", 
+                style = MaterialTheme.typography.titleMedium, 
+                color = MaterialTheme.colorScheme.primary, 
+                fontWeight = FontWeight.SemiBold
+            )
 
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(MaterialTheme.colorScheme.surface)
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surface
             ) {
-                Column {
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
                     val numGroups = (currentWorkers.toInt() / WORKERS_PER_GROUP).coerceAtLeast(1)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Потоки (всего)", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "Потоки (всего)", 
+                            style = MaterialTheme.typography.bodyMedium
+                        )
                         Text(
                             text = "${currentWorkers.toInt()} ($numGroups гр. × $WORKERS_PER_GROUP)",
                             style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Bold),
@@ -243,19 +332,23 @@ fun SettingsTab() {
                         )
                     }
 
-                    val maxWorkers = 80f
+                    val maxWorkers = dynamicMaxWorkers
                     val minWorkers = WORKERS_PER_GROUP.toFloat()
-                    val numSteps = ((maxWorkers - minWorkers) / WORKERS_PER_GROUP).toInt() - 1
-                    val currentWorkersVal = roundToGroup(currentWorkers.coerceIn(minWorkers, maxWorkers))
+                    // steps = кол-во промежуточных точек МЕЖДУ min и max
+                    // Для 8,16,24 (3 позиции) нужно steps=1, т.к. 16 единственная промежуточная
+                    val totalPositions = ((maxWorkers - minWorkers) / WORKERS_PER_GROUP).toInt() + 1
+                    val numSteps = (totalPositions - 2).coerceAtLeast(0)
+                    val currentWorkersVal = roundToGroup(currentWorkers.coerceIn(minWorkers, maxWorkers), maxWorkers)
 
                     Slider(
                         value = currentWorkersVal,
                         onValueChange = { raw ->
-                            workersInput = roundToGroup(raw)
+                            workersInput = roundToGroup(raw, maxWorkers)
                             scheduleSave()
                         },
                         valueRange = minWorkers..maxWorkers,
-                        steps = numSteps.coerceAtLeast(0),
+                        steps = numSteps,
+                        enabled = !tunnelRunning,
                         colors = SliderDefaults.colors(
                             thumbColor = MaterialTheme.colorScheme.primary,
                             activeTrackColor = MaterialTheme.colorScheme.primary,
@@ -266,18 +359,94 @@ fun SettingsTab() {
             }
         }
 
+        // ═══ TCP/UDP выбор — в кофейных тонах ═══
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surface
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text(
+                        "Протокол TURN", 
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        if (useTcp) "TCP — выше стабильность" else "UDP — рекомендуется",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // TCP Chip — кофейный стиль
+                    FilterChip(
+                        selected = useTcp,
+                        onClick = { useTcp = true; scheduleSave() },
+                        label = { 
+                            Text(
+                                "TCP", 
+                                fontWeight = if (useTcp) FontWeight.Bold else FontWeight.Medium,
+                                color = if (useTcp) Color.White else DarkCoffee
+                            ) 
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = CoffeeBrown,
+                            selectedLabelColor = Color.White,
+                            containerColor = SoftLatte,
+                            labelColor = DarkCoffee
+                        ),
+                        border = FilterChipDefaults.filterChipBorder(
+                            enabled = true,
+                            selected = useTcp,
+                            borderColor = WarmMocha.copy(alpha = 0.4f),
+                            selectedBorderColor = CoffeeBrown
+                        )
+                    )
+                    // UDP Chip — кофейный стиль
+                    FilterChip(
+                        selected = !useTcp,
+                        onClick = { useTcp = false; scheduleSave() },
+                        label = { 
+                            Text(
+                                "UDP", 
+                                fontWeight = if (!useTcp) FontWeight.Bold else FontWeight.Medium,
+                                color = if (!useTcp) Color.White else DarkCoffee
+                            ) 
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = CoffeeBrown,
+                            selectedLabelColor = Color.White,
+                            containerColor = SoftLatte,
+                            labelColor = DarkCoffee
+                        ),
+                        border = FilterChipDefaults.filterChipBorder(
+                            enabled = true,
+                            selected = !useTcp,
+                            borderColor = WarmMocha.copy(alpha = 0.4f),
+                            selectedBorderColor = CoffeeBrown
+                        )
+                    )
+                }
+            }
+        }
 
-
-
+        // ═══ Кнопки: Секреты + Подключить (шрифты как в DeployTab) ═══
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             // Кнопка "Секреты"
             OutlinedButton(
                 onClick = { showSecretsDialog = true },
-                modifier = Modifier.height(52.dp),
-                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.height(50.dp),
+                shape = RoundedCornerShape(12.dp),
                 border = androidx.compose.foundation.BorderStroke(
                     1.dp,
                     MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
@@ -286,13 +455,13 @@ fun SettingsTab() {
                 Icon(
                     imageVector = Icons.Default.Key,
                     contentDescription = null,
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier.size(18.dp)
                 )
-                Spacer(modifier = Modifier.width(6.dp))
+                Spacer(modifier = Modifier.width(8.dp))
                 Text("Секреты", fontWeight = FontWeight.SemiBold)
             }
 
-            // Кнопка "Подключить"
+            // Кнопка "Подключить" — неактивна при ошибках хешей
             Button(
                 onClick = {
                     if (tunnelRunning) {
@@ -303,27 +472,28 @@ fun SettingsTab() {
                         saveJob?.cancel()
                         scope.launch {
                             settingsStore.save(
-                                peerInput, vkHashesInput, "",
-                                workersInput.toInt(), "udp", 9000, sniInput, false
+                                peerInput, combinedHashes, "",
+                                workersInput.toInt(), if (useTcp) "tcp" else "udp", 9000, sniInput, false
                             )
                         }
                         val intent = Intent(context, TunnelService::class.java).apply {
                             action = "START"
                             putExtra("peer", "$peerInput:56000")
-                            putExtra("vk_hashes", vkHashesInput)
+                            putExtra("vk_hashes", combinedHashes)
                             putExtra("secondary_vk_hash", "")
                             putExtra("workers_per_hash", workersInput.toInt())
                             putExtra("port", 9000)
                             putExtra("sni", sniInput)
                             putExtra("connection_password", savedConnectionPassword)
+                            putExtra("protocol", if (useTcp) "tcp" else "udp")
                         }
                         if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
                         else context.startService(intent)
                     }
                 },
                 enabled = (isValid && cooldownSeconds == 0) || tunnelRunning,
-                modifier = Modifier.weight(1f).height(52.dp),
-                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.weight(1f).height(50.dp),
+                shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = if (tunnelRunning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
                 )
@@ -334,7 +504,7 @@ fun SettingsTab() {
                         cooldownSeconds > 0 -> "Подождите ($cooldownSeconds)"
                         else -> "Подключить"
                     },
-                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                    fontWeight = FontWeight.Bold
                 )
             }
         }
@@ -342,13 +512,118 @@ fun SettingsTab() {
 }
 
 // Округление до ближайшего кратного WORKERS_PER_GROUP
-private fun roundToGroup(value: Float): Float {
-    val maxW = 80f
+private fun roundToGroup(value: Float, maxW: Float = 96f): Float {
     val rounded = (Math.round(value / WORKERS_PER_GROUP) * WORKERS_PER_GROUP).toFloat()
     return rounded.coerceIn(WORKERS_PER_GROUP.toFloat(), maxW)
 }
 
+/** Извлекает хеш из VK ссылки */
+private fun stripVkUrlStatic(input: String): String {
+    var s = input.trim()
+    s = s.removePrefix("https://vk.com/call/join/")
+        .removePrefix("http://vk.com/call/join/")
+        .removePrefix("vk.com/call/join/")
+    val qIdx = s.indexOf('?')
+    if (qIdx != -1) s = s.substring(0, qIdx)
+    val hIdx = s.indexOf('#')
+    if (hIdx != -1) s = s.substring(0, hIdx)
+    return s.trimEnd('/')
+}
 
+// ═══ Модальное окно хешей ═══
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun HashesDialog(
+    hash1: String,
+    hash2: String,
+    hash3: String,
+    onSave: (String, String, String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var h1 by remember { mutableStateOf(hash1) }
+    var h2 by remember { mutableStateOf(hash2) }
+    var h3 by remember { mutableStateOf(hash3) }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 8.dp
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp).fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // Заголовок
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Tag, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("VK Хеши", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "Закрыть")
+                    }
+                }
+
+                Text(
+                    text = "С каждым добавленным хешем, лимит на потоки увеличивается. Но важно понимать: если у вас слабый интернет, избыточное кол-во воркеров будет не лучшим решением.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 4.dp)
+                )
+
+                // 3 поля хешей
+                listOf(
+                    Triple("VK Хеш 1 *", h1) { v: String -> h1 = v },
+                    Triple("VK Хеш 2", h2) { v: String -> h2 = v },
+                    Triple("VK Хеш 3", h3) { v: String -> h3 = v }
+                ).forEachIndexed { idx, (label, value, onChange) ->
+                    val isShort = value.isNotBlank() && value.length < 16
+                    OutlinedTextField(
+                        value = value,
+                        onValueChange = { raw ->
+                            val cleaned = raw.filter { c -> c != ' ' && c != '\n' }
+                            onChange(stripVkUrlStatic(cleaned))
+                        },
+                        label = { Text(label) },
+                        placeholder = { Text("Ссылка звонка или хеш") },
+                        singleLine = true,
+                        isError = isShort,
+                        supportingText = if (isShort) {
+                            { Text("Хеш ${idx + 1} — короткий (мин. 16)", color = MaterialTheme.colorScheme.error) }
+                        } else null,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = MaterialTheme.colorScheme.surface,
+                            unfocusedContainerColor = MaterialTheme.colorScheme.surface
+                        )
+                    )
+                }
+
+                // Кнопка сохранить
+                Button(
+                    onClick = {
+                        onSave(h1, h2, h3)
+                        onDismiss()
+                    },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    enabled = h1.isNotBlank() && h1.length >= 16
+                ) {
+                    Text("Сохранить", fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
+}
+
+// ═══ Модальное окно секретов ═══
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SecretsDialog(
@@ -400,11 +675,15 @@ fun SecretsDialog(
                 OutlinedTextField(
                     value = passwordInput,
                     onValueChange = { passwordInput = it },
-                    label = { Text("Пароль туннеля (любой)") },
+                    label = { Text("Заданный пароль туннеля") },
                     placeholder = { Text("Придумайте надежный пароль") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp)
+                    shape = RoundedCornerShape(12.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = MaterialTheme.colorScheme.surface,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surface
+                    )
                 )
                 
                 Spacer(modifier = Modifier.height(24.dp))
@@ -420,7 +699,7 @@ fun SecretsDialog(
                     shape = RoundedCornerShape(12.dp),
                     enabled = passwordInput.isNotEmpty()
                 ) {
-                    Text("Сохранить")
+                    Text("Сохранить", fontWeight = FontWeight.SemiBold)
                 }
             }
         }

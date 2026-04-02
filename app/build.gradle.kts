@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -9,7 +11,7 @@ android {
 
     defaultConfig {
         applicationId = "com.wdtt.client"
-        minSdk = 30
+        minSdk = 29
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
@@ -18,12 +20,25 @@ android {
         }
     }
 
+    val localProperties = Properties()
+    val localPropertiesFile = rootProject.file("local.properties")
+    if (localPropertiesFile.exists()) {
+        localProperties.load(localPropertiesFile.inputStream())
+    }
+
     signingConfigs {
         create("release") {
-            storeFile = file("../release.keystore")
-            storePassword = "android"
-            keyAlias = "wdtt"
-            keyPassword = "android"
+            val keyFile = localProperties.getProperty("KEYSTORE_FILE")
+            if (keyFile != null && file(keyFile).exists()) {
+                storeFile = file(keyFile)
+                storePassword = localProperties.getProperty("KEYSTORE_PASSWORD")
+                keyAlias = localProperties.getProperty("KEY_ALIAS")
+                keyPassword = localProperties.getProperty("KEY_PASSWORD")
+            }
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
+            enableV4Signing = true
         }
     }
 
@@ -35,7 +50,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("release")
+            val keyFile = localProperties.getProperty("KEYSTORE_FILE")
+            if (keyFile != null && file(keyFile).exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 

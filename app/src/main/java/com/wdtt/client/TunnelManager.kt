@@ -164,8 +164,8 @@ object TunnelManager {
                    cmd.add(params.connectionPassword)
                 }
 
-                // Always UDP, protocol selection removed
-                cmd.add("-udp")
+                // Protocol selection from UI
+                cmd.add(if (params.protocol == "tcp") "-tcp" else "-udp")
 
                 val pb = ProcessBuilder(cmd)
                 pb.directory(context.filesDir) // Устанавливаем рабочую директорию
@@ -278,7 +278,7 @@ object TunnelManager {
 
                     // 2. Этапы подключения и Ошибки
                     when {
-                        lineTrim.contains("Старт") -> 
+                        lineTrim.contains("Старт") || lineTrim.contains("Ожидайте") -> 
                             updateLog("creds_start", "[ВК] Получение учетных данных...", 0, false)
                         lineTrim.contains("Креды OK") || lineTrim.contains("Первые креды") -> 
                             updateLog("creds_ok", "[ВК] Учетные данные получены ✓", 0, false)
@@ -510,5 +510,6 @@ data class TunnelParams(
     val workersPerHash: Int,
     val port: Int,
     val sni: String = "",
-    val connectionPassword: String = ""
+    val connectionPassword: String = "",
+    val protocol: String = "udp"
 )

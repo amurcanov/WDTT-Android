@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "WDTT Client"
+rootProject.name = "WDTT"
 include(":app")

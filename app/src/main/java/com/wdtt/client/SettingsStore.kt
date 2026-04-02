@@ -26,6 +26,7 @@ class SettingsStore(context: Context) {
         private val DEPLOY_IP = stringPreferencesKey("deploy_ip")
         private val DEPLOY_LOGIN = stringPreferencesKey("deploy_login")
         private val DEPLOY_PASSWORD = stringPreferencesKey("deploy_password")
+        private val DEPLOY_SSH_PORT = stringPreferencesKey("deploy_ssh_port")
         private val EXCLUDED_APPS = stringPreferencesKey("excluded_apps")
         
         private val DETAILED_LOGS = booleanPreferencesKey("detailed_logs")
@@ -35,6 +36,11 @@ class SettingsStore(context: Context) {
         private val DEPLOY_MAIN_PASSWORD = stringPreferencesKey("deploy_main_password")
         private val DEPLOY_ADMIN_ID = stringPreferencesKey("deploy_admin_id")
         private val DEPLOY_BOT_TOKEN = stringPreferencesKey("deploy_bot_token")
+
+        // ═══ Proxy Mode ═══
+        private val PROXY_MODE = stringPreferencesKey("proxy_mode") // "tun" or "socks5"
+        private val PROXY_HOST = stringPreferencesKey("proxy_host")
+        private val PROXY_PORT = intPreferencesKey("proxy_port")
     }
 
     private val dataStore = appContext.dataStore
@@ -43,7 +49,7 @@ class SettingsStore(context: Context) {
     val vkHashes: Flow<String> = dataStore.data.map { it[VK_HASHES] ?: "" }
     val secondaryVkHash: Flow<String> = dataStore.data.map { it[SECONDARY_VK_HASH] ?: "" }
     val workersPerHash: Flow<Int> = dataStore.data.map { it[WORKERS_PER_HASH] ?: 16 }
-    val protocol: Flow<String> = dataStore.data.map { it[PROTOCOL] ?: "tcp" }
+    val protocol: Flow<String> = dataStore.data.map { it[PROTOCOL] ?: "udp" }
     val listenPort: Flow<Int> = dataStore.data.map { it[LISTEN_PORT] ?: 9000 }
     val sni: Flow<String> = dataStore.data.map { it[SNI] ?: "" }
     val noDns: Flow<Boolean> = dataStore.data.map { it[NO_DNS] ?: false }
@@ -51,6 +57,7 @@ class SettingsStore(context: Context) {
     val deployIp: Flow<String> = dataStore.data.map { it[DEPLOY_IP] ?: "" }
     val deployLogin: Flow<String> = dataStore.data.map { it[DEPLOY_LOGIN] ?: "" }
     val deployPassword: Flow<String> = dataStore.data.map { it[DEPLOY_PASSWORD] ?: "" }
+    val deploySshPort: Flow<String> = dataStore.data.map { it[DEPLOY_SSH_PORT] ?: "" }
     val excludedApps: Flow<String> = dataStore.data.map { it[EXCLUDED_APPS] ?: "" }
     
     val detailedLogs: Flow<Boolean> = dataStore.data.map { it[DETAILED_LOGS] ?: false }
@@ -60,6 +67,11 @@ class SettingsStore(context: Context) {
     val deployMainPassword: Flow<String> = dataStore.data.map { it[DEPLOY_MAIN_PASSWORD] ?: "" }
     val deployAdminId: Flow<String> = dataStore.data.map { it[DEPLOY_ADMIN_ID] ?: "" }
     val deployBotToken: Flow<String> = dataStore.data.map { it[DEPLOY_BOT_TOKEN] ?: "" }
+
+    // ═══ Proxy Mode ═══
+    val proxyMode: Flow<String> = dataStore.data.map { it[PROXY_MODE] ?: "tun" }
+    val proxyHost: Flow<String> = dataStore.data.map { it[PROXY_HOST] ?: "127.0.0.1" }
+    val proxyPort: Flow<Int> = dataStore.data.map { it[PROXY_PORT] ?: 1080 }
 
     suspend fun save(
         peer: String,
@@ -83,11 +95,12 @@ class SettingsStore(context: Context) {
         }
     }
 
-    suspend fun saveDeploy(ip: String, login: String, pass: String) {
+    suspend fun saveDeploy(ip: String, login: String, pass: String, sshPort: String) {
         dataStore.edit { prefs ->
             prefs[DEPLOY_IP] = ip
             prefs[DEPLOY_LOGIN] = login
             prefs[DEPLOY_PASSWORD] = pass
+            prefs[DEPLOY_SSH_PORT] = sshPort
         }
     }
 
@@ -111,11 +124,21 @@ class SettingsStore(context: Context) {
     }
     
     // ═══ Сохранение секретов деплоя ═══
-    suspend fun saveDeploySecrets(mainPass: String, adminId: String, botToken: String) {
+    suspend fun saveDeploySecrets(mainPass: String, adminId: String, botToken: String, sshPort: String) {
         dataStore.edit { prefs ->
             prefs[DEPLOY_MAIN_PASSWORD] = mainPass
             prefs[DEPLOY_ADMIN_ID] = adminId
             prefs[DEPLOY_BOT_TOKEN] = botToken
+            prefs[DEPLOY_SSH_PORT] = sshPort
+        }
+    }
+
+    // ═══ Сохранение proxy mode ═══
+    suspend fun saveProxyMode(mode: String, host: String, port: Int) {
+        dataStore.edit { prefs ->
+            prefs[PROXY_MODE] = mode
+            prefs[PROXY_HOST] = host
+            prefs[PROXY_PORT] = port
         }
     }
 }

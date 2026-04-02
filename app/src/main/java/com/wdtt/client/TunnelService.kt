@@ -68,7 +68,8 @@ class TunnelService : Service() {
                     workersPerHash = intent.getIntExtra("workers_per_hash", 16),
                     port = intent.getIntExtra("port", 9000),
                     sni = intent.getStringExtra("sni") ?: "",
-                    connectionPassword = intent.getStringExtra("connection_password") ?: ""
+                    connectionPassword = intent.getStringExtra("connection_password") ?: "",
+                    protocol = intent.getStringExtra("protocol") ?: "udp"
                 )
                 startTunnel(params)
             }
@@ -303,7 +304,7 @@ class TunnelService : Service() {
         )
 
         return NotificationCompat.Builder(this, "wdtt_tunnel_v3")
-            .setContentTitle("WDTT Client")
+            .setContentTitle("WDTT")
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_stat_connected)
             .setOngoing(true)

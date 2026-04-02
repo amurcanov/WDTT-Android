@@ -41,13 +41,13 @@ const (
 	wgClientAddr   = "10.66.66.2"
 	wgClientCIDR   = wgClientAddr + "/32"
 	wgServerCIDR   = wgServerAddr + "/24"
-	internalWGPort = 51820
+	internalWGPort = 56001
 	dns            = "1.1.1.1"
 	wgMTU          = 1280
 	keepalive      = 25
 )
 
-
+// ==================== База данных и Бот ====================
 
 type ClientDevice struct {
 	DeviceID string `json:"device_id"`
@@ -63,13 +63,13 @@ type PasswordEntry struct {
 	UpBytes   int64  `json:"up_bytes"`   // отдано клиентом
 }
 
-
+// Трафик главного пароля (владельца)
 var (
 	mainPassDown int64
 	mainPassUp   int64
 )
 
-
+// Онлайн-статус устройств
 var (
 	activeDevices   = make(map[string]int32) // deviceID -> кол-во активных коннектов
 	activeDevicesMu sync.Mutex
@@ -457,7 +457,7 @@ func sendTelegram(token string, chatID int64, text string, replyMarkup interface
 	http.Post(url, "application/json", bytes.NewBuffer(body))
 }
 
-
+// ==================== Пул буферов ====================
 
 var bufPool = sync.Pool{
 	New: func() interface{} {
@@ -469,7 +469,7 @@ var bufPool = sync.Pool{
 func getBuf() *[]byte  { return bufPool.Get().(*[]byte) }
 func putBuf(b *[]byte) { bufPool.Put(b) }
 
-
+// ==================== Оптимизация ====================
 
 func enableBBR() {
 	log.Println("[SYS] Оптимизация TCP...")
@@ -492,7 +492,7 @@ func enableBBR() {
 	log.Println("[SYS] BBR включен ✓")
 }
 
-
+// ==================== Статистика ====================
 
 var (
 	totalBytesFromClient int64
@@ -564,7 +564,7 @@ func formatUptime(d time.Duration) string {
 	return fmt.Sprintf("%dм", mins)
 }
 
-
+// ==================== Утилиты ====================
 
 func runCmd(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).CombinedOutput()
@@ -588,7 +588,7 @@ func getDefaultInterface() string {
 	return "eth0"
 }
 
-
+// ==================== Ключи ====================
 
 type wgKeys struct {
 	serverPrivate, serverPublic, clientPrivate, clientPublic string
@@ -660,7 +660,7 @@ generate:
 	return keys, nil
 }
 
-
+// ==================== NAT ====================
 
 func setupFullConeNAT(wgIface string) error {
 	log.Println("[NAT] ══════════════════════════════════════")
@@ -669,70 +669,17 @@ func setupFullConeNAT(wgIface string) error {
 	os.WriteFile(fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/disable_ipv6", wgIface), []byte("1"), 0644)
 	os.WriteFile("/proc/sys/net/ipv6/conf/all/disable_ipv6", []byte("1"), 0644)
 
-	for path, val := range map[string]string{
-		"/proc/sys/net/netfilter/nf_conntrack_udp_timeout":        "300",
-		"/proc/sys/net/netfilter/nf_conntrack_udp_timeout_stream": "300",
-		"/proc/sys/net/netfilter/nf_conntrack_max":                "262144",
-	} {
-		os.WriteFile(path, []byte(val), 0644)
-	}
-
 	extIface := getDefaultInterface()
 	log.Printf("[NAT] Внешний: %s", extIface)
 
-	// Очистка
-	for _, cmd := range []string{
-		fmt.Sprintf("iptables -t nat -D POSTROUTING -s %s -o %s -j FULLCONENAT", wgServerCIDR, extIface),
-		fmt.Sprintf("iptables -t nat -D POSTROUTING -s %s -o %s -j MASQUERADE", wgServerCIDR, extIface),
-		fmt.Sprintf("iptables -t nat -D PREROUTING -i %s -j FULLCONENAT", extIface),
-	} {
-		for i := 0; i < 5; i++ {
-			parts := strings.Fields(cmd)
-			exec.Command(parts[0], parts[1:]...).Run()
-		}
+	// Очистка старых MASQUERADE правил
+	for i := 0; i < 5; i++ {
+		exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", wgServerCIDR, "-o", extIface, "-j", "MASQUERADE").Run()
 	}
 
-	runCmdSilent("modprobe", "xt_FULLCONENAT")
-
-	if exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING", "-j", "FULLCONENAT").Run() == nil {
-		exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING", "-j", "FULLCONENAT").Run()
-
-		err1 := exec.Command("iptables", "-t", "nat", "-I", "PREROUTING", "1",
-			"-i", extIface, "-j", "FULLCONENAT").Run()
-		err2 := exec.Command("iptables", "-t", "nat", "-I", "POSTROUTING", "1",
-			"-s", wgServerCIDR, "-o", extIface, "-j", "FULLCONENAT").Run()
-
-		if err1 == nil && err2 == nil {
-			natType = "Full Cone ✅"
-		} else {
-			natType = "Error"
-		}
-	} else {
-		exec.Command("nft", "delete", "table", "ip", "wdtt_nat").Run()
-
-		cmds := [][]string{
-			{"nft", "add", "table", "ip", "wdtt_nat"},
-			{"nft", "add", "chain", "ip", "wdtt_nat", "prerouting", "{ type nat hook prerouting priority -100 ; }"},
-			{"nft", "add", "chain", "ip", "wdtt_nat", "postrouting", "{ type nat hook postrouting priority 100 ; }"},
-			{"nft", "add", "rule", "ip", "wdtt_nat", "postrouting", "saddr", wgServerCIDR, "oifname", extIface, "masquerade", "persistent"},
-		}
-
-		success := true
-		for _, cmd := range cmds {
-			if err := exec.Command(cmd[0], cmd[1:]...).Run(); err != nil {
-				success = false
-				break
-			}
-		}
-
-		if success {
-			natType = "nftables (Cone) ✅"
-		} else {
-			natType = "MASQUERADE"
-			exec.Command("iptables", "-t", "nat", "-I", "POSTROUTING", "1",
-				"-s", wgServerCIDR, "-o", extIface, "-j", "MASQUERADE").Run()
-		}
-	}
+	// Установка MASQUERADE (основной NAT)
+	exec.Command("iptables", "-t", "nat", "-I", "POSTROUTING", "1", "-s", wgServerCIDR, "-o", extIface, "-j", "MASQUERADE").Run()
+	natType = "MASQUERADE ✅"
 
 	setupForwardRules(wgIface)
 	log.Printf("[NAT] Режим: %s", natType)
@@ -750,7 +697,7 @@ func setupForwardRules(wgIface string) {
 	exec.Command("iptables", "-A", "FORWARD", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT").Run()
 }
 
-
+// ==================== WireGuard ====================
 
 func startUserspaceWG(keys *wgKeys) (*device.Device, error) {
 	runCmdSilent("ip", "link", "del", wgIfaceName)
@@ -857,15 +804,18 @@ PersistentKeepalive = %d`,
 	)
 }
 
-
+// ==================== Main ====================
 
 func main() {
 	listen := flag.String("listen", "0.0.0.0:56000", "DTLS адрес")
+	wgPort := flag.Int("wg-port", internalWGPort, "WireGuard UDP порт")
 	configDir := flag.String("config-dir", "/etc/wireguard", "директория конфигурации")
 	mainPass := flag.String("password", "", "пароль владельца")
 	adminID := flag.String("admin", "", "Telegram Admin ID")
 	botToken := flag.String("bot-token", "", "Telegram Bot Token")
 	flag.Parse()
+
+	_ = wgPort // WG порт задаётся через internalWGPort (56001)
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	log.Println("══════════════════════════════════════════")
@@ -946,7 +896,7 @@ func main() {
 	}
 }
 
-
+// ==================== Обработка соединений ====================
 
 func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgDev *device.Device, keys *wgKeys) {
 	atomic.AddInt64(&totalConns, 1)
@@ -1052,13 +1002,6 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 				log.Printf("[WG] Отказ (неверный пароль) от %s", deviceID)
 			}
 			dbMutex.Unlock()
-		}
-
-		clientConn.SetReadDeadline(time.Now().Add(10 * time.Second))
-		n, _ = clientConn.Read(buf)
-		clientConn.SetReadDeadline(time.Time{})
-		if string(buf[:n]) != "ACK" {
-			return
 		}
 
 		clientConn.SetReadDeadline(time.Now().Add(5 * time.Minute))
@@ -1179,6 +1122,10 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 			wgConn.SetReadDeadline(time.Now().Add(90 * time.Second))
 			nn, err := wgConn.Read(*b)
 			if err != nil {
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					// Игнорируем таймауты wgConn. Это нормально, если нет трафика (idle)
+					continue
+				}
 				return
 			}
 			atomic.AddInt64(&totalBytesToClient, int64(nn))

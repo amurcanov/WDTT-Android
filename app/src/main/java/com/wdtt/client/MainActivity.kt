@@ -33,6 +33,7 @@ import com.wdtt.client.ui.LogsTab
 import com.wdtt.client.ui.SettingsTab
 import com.wdtt.client.ui.DeployTab
 import com.wdtt.client.ui.ExceptionsTab
+import com.wdtt.client.ui.InfoTab
 import com.wdtt.client.WDTTTheme
 
 class MainActivity : ComponentActivity() {
@@ -107,7 +108,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MainScreen() {
     var selectedTab by remember { mutableIntStateOf(0) }
-    val tabs = listOf("Туннель", "Деплой", "Исключ.", "Логи")
+    val tabs = listOf("Туннель", "Деплой", "Исключ.", "Логи", "Инфо")
     val unreadErrors by TunnelManager.unreadErrorCount.collectAsStateWithLifecycle()
 
     Scaffold(
@@ -175,6 +176,7 @@ fun MainScreen() {
                 1 -> DeployTab()
                 2 -> ExceptionsTab()
                 3 -> LogsTab()
+                4 -> InfoTab()
             }
         }
     }

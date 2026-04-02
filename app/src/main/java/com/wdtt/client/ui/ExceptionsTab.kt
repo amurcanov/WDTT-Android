@@ -31,17 +31,23 @@ import kotlinx.coroutines.withContext
 import androidx.compose.runtime.Stable
 import androidx.compose.foundation.lazy.rememberLazyListState
 
+import androidx.compose.ui.graphics.ImageBitmap
+
 @Stable
 data class AppItem(
     val name: String,
     val packageName: String,
-    val icon: Drawable?
+    val icon: ImageBitmap?
 )
+
+object AppCache {
+    var cachedList: List<AppItem>? = null
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ExceptionsTab() {
-    val context = LocalContext.current
+    val context = LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
     val settingsStore = remember { SettingsStore(context) }
     
@@ -50,12 +56,13 @@ fun ExceptionsTab() {
         savedExcluded.split(",").filter { it.isNotEmpty() }.toSet() 
     }
 
-    var appsList by remember { mutableStateOf<List<AppItem>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(true) }
+    var appsList by remember { mutableStateOf<List<AppItem>>(AppCache.cachedList ?: emptyList()) }
+    var isLoading by remember { mutableStateOf(AppCache.cachedList == null) }
     var searchQuery by remember { mutableStateOf("") }
     
     // Load Apps
     LaunchedEffect(Unit) {
+        if (AppCache.cachedList != null) return@LaunchedEffect
         isLoading = true
         withContext(Dispatchers.IO) {
             val list = mutableListOf<AppItem>()
@@ -63,18 +70,18 @@ fun ExceptionsTab() {
             val installedApps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
             
             installedApps.forEach { app ->
-                // Исключаем системные критические вещи, себя и ВК
                 if (app.packageName != context.packageName && 
                     !app.packageName.contains("vkontakte") && 
                     !app.packageName.contains("vk.calls")) {
                     list.add(AppItem(
                         name = app.loadLabel(pm).toString(),
                         packageName = app.packageName,
-                        icon = app.loadIcon(pm)
+                        icon = app.loadIcon(pm)?.toBitmap()?.asImageBitmap()
                     ))
                 }
             }
             appsList = list.sortedBy { it.name.lowercase() }
+            AppCache.cachedList = appsList
         }
         isLoading = false
     }
@@ -153,7 +160,7 @@ fun AppRow(app: AppItem, isSelected: Boolean, onClick: () -> Unit) {
             // Icon
             if (app.icon != null) {
                 Image(
-                    bitmap = app.icon.toBitmap().asImageBitmap(),
+                    bitmap = app.icon,
                     contentDescription = null,
                     modifier = Modifier.size(40.dp).clip(RoundedCornerShape(8.dp))
                 )

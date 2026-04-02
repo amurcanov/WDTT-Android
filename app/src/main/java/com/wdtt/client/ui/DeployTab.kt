@@ -39,9 +39,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.Properties
 
-private const val CMD_TIMEOUT = 900000L
-
-
+private const val CMD_TIMEOUT = 900000L // 15 минут
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -64,9 +62,23 @@ fun DeployTab() {
     val savedMainPass by settingsStore.deployMainPassword.collectAsStateWithLifecycle(initialValue = "")
     val savedAdminId by settingsStore.deployAdminId.collectAsStateWithLifecycle(initialValue = "")
     val savedBotToken by settingsStore.deployBotToken.collectAsStateWithLifecycle(initialValue = "")
+    val savedSshPort by settingsStore.deploySshPort.collectAsStateWithLifecycle(initialValue = "22")
 
     var showSecretsDialog by remember { mutableStateOf(false) }
     var showUninstallDialog by remember { mutableStateOf(false) }
+
+    var showSuccessBanner by remember { mutableStateOf(false) }
+    var successCountdown by remember { mutableIntStateOf(5) }
+
+    LaunchedEffect(showSuccessBanner) {
+        if (showSuccessBanner) {
+            while (successCountdown > 0) {
+                kotlinx.coroutines.delay(1000)
+                successCountdown--
+            }
+            showSuccessBanner = false
+        }
+    }
 
     val isDeploying by DeployManager.isDeploying.collectAsStateWithLifecycle()
     val deployProgress by DeployManager.deployProgress.collectAsStateWithLifecycle()
@@ -92,10 +104,10 @@ fun DeployTab() {
         OutlinedTextField(
             value = ip,
             onValueChange = {
-                ip = it
-                scope.launch { settingsStore.saveDeploy(it, login, password) }
+                ip = it.filter { c -> !c.isWhitespace() }
+                scope.launch { settingsStore.saveDeploy(ip, login, password, savedSshPort) }
             },
-            label = { Text("IP сервера (без порта)") },
+            label = { Text("IP сервера или домен (без порта)") },
             placeholder = { Text("1.2.3.4 (без порта)") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
@@ -114,8 +126,8 @@ fun DeployTab() {
             OutlinedTextField(
                 value = login,
                 onValueChange = {
-                    login = it
-                    scope.launch { settingsStore.saveDeploy(ip, it, password) }
+                    login = it.filter { c -> !c.isWhitespace() }
+                    scope.launch { settingsStore.saveDeploy(ip, login, password, savedSshPort) }
                 },
                 label = { Text("Логин") },
                 placeholder = { Text("root") },
@@ -131,8 +143,8 @@ fun DeployTab() {
             OutlinedTextField(
                 value = password,
                 onValueChange = {
-                    password = it
-                    scope.launch { settingsStore.saveDeploy(ip, login, it) }
+                    password = it.filter { c -> !c.isWhitespace() }
+                    scope.launch { settingsStore.saveDeploy(ip, login, password, savedSshPort) }
                 },
                 label = { Text("Пароль SSH") },
                 placeholder = { Text("password") },
@@ -153,6 +165,7 @@ fun DeployTab() {
                 initialMainPass = savedMainPass,
                 initialAdminId = savedAdminId,
                 initialBotToken = savedBotToken,
+                initialSshPort = savedSshPort,
                 onDismiss = { showSecretsDialog = false }
             )
         }
@@ -222,12 +235,16 @@ fun DeployTab() {
                             if (Build.VERSION.SDK_INT >= 26) appContext.startForegroundService(intent)
                             else appContext.startService(intent)
 
-                            performDeploy(
+                            val success = performDeploy(
                                 context = appContext,
-                                host = ip, user = effectiveLogin, pass = password,
+                                host = ip, user = effectiveLogin, pass = password, port = savedSshPort.toIntOrNull() ?: 22,
                                 mainPass = savedMainPass, adminId = savedAdminId, botToken = savedBotToken,
                                 onProgress = { p, s -> DeployManager.updateProgress(p, s) }
                             )
+                            if (success) {
+                                successCountdown = 5
+                                showSuccessBanner = true
+                            }
                         } finally {
                             try { appContext.startService(Intent(appContext, TunnelService::class.java).apply { action = "DEPLOY_STOP" }) } catch (_: Exception) {}
                             // stopDeploy вызывается внутри performDeploy
@@ -249,7 +266,7 @@ fun DeployTab() {
 
             Button(
                 onClick = {
-                    if (ip.isBlank() || password.isBlank() || savedMainPass.isBlank()) return@Button
+                    if (ip.isBlank() || password.isBlank()) return@Button
                     showUninstallDialog = true
                 },
                 modifier = Modifier.weight(1f).height(50.dp),
@@ -273,7 +290,7 @@ fun DeployTab() {
                         try {
                             DeployManager.startDeploy()
                             performUninstall(
-                                host = ip, user = effectiveLogin, pass = password,
+                                host = ip, user = effectiveLogin, pass = password, port = savedSshPort.toIntOrNull() ?: 22,
                                 onProgress = { p, s -> DeployManager.updateProgress(p, s) }
                             )
                         } catch (_: Exception) {}
@@ -287,10 +304,33 @@ fun DeployTab() {
         } else {
             Spacer(modifier = Modifier.weight(1f))
         }
+
+        if (showSuccessBanner) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                color = androidx.compose.ui.graphics.Color(0xFF4CAF50).copy(alpha = 0.2f),
+                border = androidx.compose.foundation.BorderStroke(1.dp, androidx.compose.ui.graphics.Color(0xFF4CAF50))
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.CheckCircle, contentDescription = null, tint = androidx.compose.ui.graphics.Color(0xFF4CAF50))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "Деплой успешно завершен ($successCountdown)",
+                        color = androidx.compose.ui.graphics.Color(0xFF4CAF50),
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+        }
     }
 }
 
-
+// ==================== SSH (полностью переработанный) ====================
 
 private class SSHClient(private val session: Session, private val pass: String) {
 
@@ -395,9 +435,9 @@ private class SSHClient(private val session: Session, private val pass: String) 
 }
 
 /** Создать SSH-сессию с максимальной надёжностью */
-private fun createSSHSession(host: String, user: String, pass: String): Session {
+private fun createSSHSession(host: String, user: String, pass: String, port: Int = 22): Session {
     val jsch = JSch()
-    val session = jsch.getSession(user, host, 22)
+    val session = jsch.getSession(user, host, port)
     session.setPassword(pass)
     session.setConfig(Properties().apply {
         put("StrictHostKeyChecking", "no")
@@ -410,18 +450,18 @@ private fun createSSHSession(host: String, user: String, pass: String): Session 
     return session
 }
 
-
+// ==================== Деплой ====================
 
 private suspend fun performDeploy(
     context: Context,
-    host: String, user: String, pass: String,
+    host: String, user: String, pass: String, port: Int,
     mainPass: String, adminId: String, botToken: String,
     onProgress: (Float, String) -> Unit
-) = withContext(Dispatchers.IO) {
+): Boolean = withContext(Dispatchers.IO) {
     var session: Session? = null
     try {
         onProgress(0.02f, "Подключение...")
-        session = createSSHSession(host, user, pass)
+        session = createSSHSession(host, user, pass, port)
         DeployManager.activeSession = session
         val ssh = SSHClient(session, pass)
 
@@ -440,7 +480,7 @@ private suspend fun performDeploy(
         } catch (e: Exception) {
             DeployManager.writeError("Assets extraction failed: ${e.message}")
             DeployManager.stopDeploy("Ошибка: файлы не найдены в assets")
-            return@withContext
+            return@withContext false
         }
 
         onProgress(0.06f, "Загрузка на сервер...")
@@ -456,17 +496,21 @@ private suspend fun performDeploy(
         if (output.contains("✅") || output.contains("Деплой успешно") || output.contains("active")) {
             DeployManager.stopDeploy("success")
             TunnelManager.addDeploySuccessLog("🟢 Деплой успешно завершен. Сервис активен.")
+            return@withContext true
         } else if (output.contains("error:")) {
             DeployManager.writeError("Deploy script output contains error")
             DeployManager.stopDeploy("Ошибка выполнения скрипта (см. errors.log)")
+            return@withContext false
         } else {
             DeployManager.stopDeploy("success")
             TunnelManager.addDeploySuccessLog("🟢 Деплой завершён. (Проверьте подключение)")
+            return@withContext true
         }
 
     } catch (e: Exception) {
         DeployManager.writeError("Deploy critical: ${e.message}\n${e.stackTraceToString().take(500)}")
         DeployManager.stopDeploy("Ошибка: ${e.message?.take(100)}")
+        return@withContext false
     } finally {
         try { session?.disconnect() } catch (_: Exception) {}
         DeployManager.activeSession = null
@@ -474,16 +518,16 @@ private suspend fun performDeploy(
 }
 
 
-
+// ==================== Удаление ====================
 
 private suspend fun performUninstall(
-    host: String, user: String, pass: String,
+    host: String, user: String, pass: String, port: Int,
     onProgress: (Float, String) -> Unit
 ) = withContext(Dispatchers.IO) {
     var session: Session? = null
     try {
         onProgress(0.05f, "Подключение...")
-        session = createSSHSession(host, user, pass)
+        session = createSSHSession(host, user, pass, port)
         DeployManager.activeSession = session
         val ssh = SSHClient(session, pass)
 
@@ -499,12 +543,12 @@ private suspend fun performUninstall(
         ssh.exec("sudo rm -f /usr/local/bin/wdtt-server", timeout = 10000L)
 
         onProgress(0.45f, "Очистка iptables...")
-        ssh.exec("sudo bash -c 'for i in 1 2 3 4 5; do iptables -t nat -D POSTROUTING -s 10.66.66.0/24 -j FULLCONENAT 2>/dev/null || true; iptables -t nat -D PREROUTING -j FULLCONENAT 2>/dev/null || true; iptables -t nat -D POSTROUTING -s 10.66.66.0/24 -j MASQUERADE 2>/dev/null || true; iptables -D INPUT -p udp --dport 56000 -j ACCEPT 2>/dev/null || true; iptables -D INPUT -p udp --dport 51820 -j ACCEPT 2>/dev/null || true; iptables -D FORWARD -j ACCEPT 2>/dev/null || true; done'", timeout = 15000L)
+        ssh.exec("sudo bash -c 'for i in 1 2 3 4 5; do iptables -t nat -D POSTROUTING -s 10.66.66.0/24 -j MASQUERADE 2>/dev/null || true; iptables -D INPUT -p udp --dport 56000 -j ACCEPT 2>/dev/null || true; iptables -D INPUT -p udp --dport 56001 -j ACCEPT 2>/dev/null || true; iptables -D INPUT -p udp --dport 1024:65535 -j ACCEPT 2>/dev/null || true; iptables -D FORWARD -j ACCEPT 2>/dev/null || true; done'", timeout = 15000L)
 
         onProgress(0.60f, "Удаление WireGuard...")
         ssh.exec("sudo ip link del wg0 2>/dev/null || true", timeout = 10000L)
         ssh.exec("sudo rm -rf /etc/wireguard/wg-keys.dat /etc/wireguard/passwords.json /etc/wireguard/server.log", timeout = 10000L)
-        ssh.exec("sudo fuser -k 51820/udp 56000/udp 2>/dev/null || true", timeout = 10000L)
+        ssh.exec("sudo fuser -k 56001/udp 56000/udp 2>/dev/null || true", timeout = 10000L)
 
         onProgress(0.75f, "Удаление Full Cone NAT...")
         ssh.exec("sudo bash /tmp/deploy.sh uninstall 2>/dev/null || true", timeout = 30000L)
@@ -525,7 +569,7 @@ private suspend fun performUninstall(
     }
 }
 
-
+// ==================== Модалки ====================
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -534,12 +578,14 @@ fun DeploySecretsDialog(
     initialMainPass: String,
     initialAdminId: String,
     initialBotToken: String,
+    initialSshPort: String,
     onDismiss: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
     var passInput by remember { mutableStateOf(initialMainPass) }
     var adminIdInput by remember { mutableStateOf(initialAdminId) }
     var botTokenInput by remember { mutableStateOf(initialBotToken) }
+    var sshPortInput by remember { mutableStateOf(if (initialSshPort.isBlank()) "22" else initialSshPort) }
 
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -550,7 +596,7 @@ fun DeploySecretsDialog(
             Column(modifier = Modifier.padding(20.dp).fillMaxWidth()) {
                 Text("Секреты Деплоя", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(16.dp))
-                OutlinedTextField(value = passInput, onValueChange = { passInput = it }, label = { Text("Пароль туннеля (любой) *") }, placeholder = { Text("Придумайте надежный пароль") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp))
+                OutlinedTextField(value = passInput, onValueChange = { passInput = it }, label = { Text("Задайте пароль туннеля (любой)") }, placeholder = { Text("Придумайте надежный пароль") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp))
                 Spacer(Modifier.height(16.dp))
                 HorizontalDivider()
                 Spacer(Modifier.height(8.dp))
@@ -559,10 +605,18 @@ fun DeploySecretsDialog(
                 OutlinedTextField(value = adminIdInput, onValueChange = { adminIdInput = it }, label = { Text("ID Админа (Опционально)") }, placeholder = { Text("ID из @getmyid_bot") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp), keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number))
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(value = botTokenInput, onValueChange = { botTokenInput = it }, label = { Text("Токен Бота (Опционально)") }, placeholder = { Text("Токен от BotFather") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp))
+                Spacer(Modifier.height(16.dp))
+                HorizontalDivider()
+                Spacer(Modifier.height(8.dp))
+                Text("SSH Порт", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(value = sshPortInput, onValueChange = { sshPortInput = it }, label = { Text("Порт для деплоя SSH") }, placeholder = { Text("22") }, singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp), keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number))
+                
                 Spacer(Modifier.height(24.dp))
                 Button(
                     onClick = {
-                        scope.launch { settingsStore.saveDeploySecrets(passInput, adminIdInput, botTokenInput) }
+                        val finalPort = if (sshPortInput.isBlank()) "22" else sshPortInput
+                        scope.launch { settingsStore.saveDeploySecrets(passInput, adminIdInput, botTokenInput, finalPort) }
                         onDismiss()
                     },
                     modifier = Modifier.fillMaxWidth().height(48.dp),
@@ -601,7 +655,7 @@ fun UninstallConfirmDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
 
 private fun String.containsAny(vararg items: String) = items.any { contains(it, ignoreCase = true) }
 
-
+// ==================== Умная Змейка ====================
 
 data class SnakePoint(val x: Int, val y: Int)
 
