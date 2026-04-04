@@ -38,7 +38,7 @@ import java.util.regex.Pattern
 @Composable
 fun InfoTab() {
     val scope = androidx.compose.runtime.rememberCoroutineScope()
-    val currentVersion = "v1.0.2"
+    val currentVersion = "v1.0.3"
     var updateStatus by remember { mutableStateOf("Проверить обновление") }
 
     Column(
@@ -101,7 +101,7 @@ fun InfoTab() {
                                 }
                                 
                                 if (result != null) {
-                                    updateStatus = if (result == currentVersion || result == "1.0.2") {
+                                    updateStatus = if (result == currentVersion || result == "1.0.3") {
                                         "У вас последняя версия"
                                     } else {
                                         "Вышла $result (посетите релизы)"

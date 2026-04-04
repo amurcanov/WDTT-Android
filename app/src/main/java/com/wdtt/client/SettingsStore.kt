@@ -23,6 +23,8 @@ class SettingsStore(context: Context) {
         private val NO_DTLS = booleanPreferencesKey("no_dtls")
         private val NO_DNS = booleanPreferencesKey("no_dns")
 
+        private val USER_AGENT = stringPreferencesKey("user_agent")
+
         private val DEPLOY_IP = stringPreferencesKey("deploy_ip")
         private val DEPLOY_LOGIN = stringPreferencesKey("deploy_login")
         private val DEPLOY_PASSWORD = stringPreferencesKey("deploy_password")
@@ -53,6 +55,7 @@ class SettingsStore(context: Context) {
     val listenPort: Flow<Int> = dataStore.data.map { it[LISTEN_PORT] ?: 9000 }
     val sni: Flow<String> = dataStore.data.map { it[SNI] ?: "" }
     val noDns: Flow<Boolean> = dataStore.data.map { it[NO_DNS] ?: false }
+    val userAgent: Flow<String> = dataStore.data.map { it[USER_AGENT] ?: "" }
 
     val deployIp: Flow<String> = dataStore.data.map { it[DEPLOY_IP] ?: "" }
     val deployLogin: Flow<String> = dataStore.data.map { it[DEPLOY_LOGIN] ?: "" }
@@ -92,6 +95,12 @@ class SettingsStore(context: Context) {
             prefs[LISTEN_PORT] = listenPort
             prefs[SNI] = sni
             prefs[NO_DNS] = noDns
+        }
+    }
+
+    suspend fun saveUserAgent(ua: String) {
+        dataStore.edit { prefs ->
+            prefs[USER_AGENT] = ua
         }
     }
 

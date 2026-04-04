@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +13,9 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	neturl "net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,6 +32,24 @@ var (
 )
 
 var noDnsFlag atomic.Bool
+
+var userAgent atomic.Value
+
+func init() {
+	userAgent.Store("Mozilla/5.0")
+}
+
+// SetUserAgent устанавливает User-Agent извне (передаётся из Android)
+func SetUserAgent(ua string) {
+	if ua != "" {
+		userAgent.Store(ua)
+	}
+}
+
+// getUserAgent возвращает текущий User-Agent
+func getUserAgent() string {
+	return userAgent.Load().(string)
+}
 
 func getSharedTransport() *http.Transport {
 	sharedTransportOnce.Do(func() {
@@ -64,8 +88,338 @@ func GetCredsWithFallback(ctx context.Context, tp *TurnParams, hash string, stat
 	return nil, err
 }
 
+// region VK Smart Captcha Solver
+
+type vkCaptchaError struct {
+	ErrorCode      int
+	ErrorMsg       string
+	CaptchaSid     string
+	RedirectUri    string
+	SessionToken   string
+	CaptchaTs      string
+	CaptchaAttempt string
+}
+
+func parseVkCaptchaError(errData map[string]interface{}) *vkCaptchaError {
+	codeFloat, _ := errData["error_code"].(float64)
+	redirectUri, _ := errData["redirect_uri"].(string)
+	errorMsg, _ := errData["error_msg"].(string)
+
+	captchaSid, _ := errData["captcha_sid"].(string)
+	if captchaSid == "" {
+		if sidNum, ok := errData["captcha_sid"].(float64); ok {
+			captchaSid = fmt.Sprintf("%.0f", sidNum)
+		}
+	}
+
+	var sessionToken string
+	if redirectUri != "" {
+		if parsed, err := neturl.Parse(redirectUri); err == nil {
+			sessionToken = parsed.Query().Get("session_token")
+		}
+	}
+
+	var captchaTs string
+	if tsFloat, ok := errData["captcha_ts"].(float64); ok {
+		captchaTs = strconv.FormatFloat(tsFloat, 'f', -1, 64)
+	} else if tsStr, ok := errData["captcha_ts"].(string); ok {
+		captchaTs = tsStr
+	}
+
+	var captchaAttempt string
+	if attFloat, ok := errData["captcha_attempt"].(float64); ok {
+		captchaAttempt = fmt.Sprintf("%.0f", attFloat)
+	} else if attStr, ok := errData["captcha_attempt"].(string); ok {
+		captchaAttempt = attStr
+	}
+
+	return &vkCaptchaError{
+		ErrorCode:      int(codeFloat),
+		ErrorMsg:       errorMsg,
+		CaptchaSid:     captchaSid,
+		RedirectUri:    redirectUri,
+		SessionToken:   sessionToken,
+		CaptchaTs:      captchaTs,
+		CaptchaAttempt: captchaAttempt,
+	}
+}
+
+func solveVkCaptcha(ctx context.Context, captchaErr *vkCaptchaError, profile BotProfile) (string, error) {
+	log.Printf("[КАПЧА] Решаю VK Smart Captcha автоматически...")
+	if captchaErr.SessionToken == "" {
+		return "", fmt.Errorf("нет session_token в redirect_uri")
+	}
+
+	// Генерируем рандом для таймингов (привязан к сессии капчи)
+	captchaRng := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	// Шаг 1: Загружаем страницу капчи (как реальный браузер)
+	log.Printf("[КАПЧА] Шаг 1/4: Загрузка страницы капчи (fetch POW)...")
+	powInput, difficulty, err := fetchPowInput(ctx, captchaErr.RedirectUri, profile.UserAgent)
+	if err != nil {
+		return "", fmt.Errorf("не удалось получить PoW input: %w", err)
+	}
+
+	// Генерируем тайминги для этой сессии
+	timing := GenerateCaptchaTiming(captchaRng)
+
+	// Имитируем время "чтения" капчи человеком (страница загрузилась, человек смотрит)
+	log.Printf("[КАПЧА]   ...человек осматривает страницу капчи (%dмс)...", timing.ReadCaptchaMs)
+	time.Sleep(time.Duration(timing.ReadCaptchaMs) * time.Millisecond)
+
+	// Шаг 2: Решаем PoW (быстро, компьютер решает за миллисекунды)
+	log.Printf("[КАПЧА] Шаг 2/4: Решение PoW (diff=%d)...", difficulty)
+	hash := solvePoW(powInput, difficulty)
+	// Маленькая пауза после решения PoW перед действиями API
+	time.Sleep(time.Duration(timing.FetchPowMs) * time.Millisecond)
+
+	// Шаг 3: Выполняем captchaNotRobot API с реалистичными таймингами
+	// (settings → componentDone → check → endSession — все внутри)
+	log.Printf("[КАПЧА] Шаг 3/4: Отправка captchaNotRobot (общее время ~%dмс)...", 
+		timing.SettingsToComponentMs+timing.ComponentToCheckMs+timing.CheckToEndMs+timing.EndSessionMs)
+	successToken, err := callCaptchaNotRobot(ctx, captchaErr.SessionToken, hash, profile, captchaRng)
+	if err != nil {
+		return "", fmt.Errorf("ошибка captchaNotRobot API: %w", err)
+	}
+
+	// Шаг 4: Завершаем сессию
+	log.Printf("[КАПЧА] Шаг 4/4: endSession (%dмс)...", timing.EndSessionMs)
+	time.Sleep(time.Duration(timing.EndSessionMs) * time.Millisecond)
+	
+	vkReq := func(method string, postData string) (map[string]interface{}, error) {
+		reqURL := "https://api.vk.ru/method/" + method + "?v=5.131"
+		req, _ := http.NewRequestWithContext(ctx, "POST", reqURL, strings.NewReader(postData))
+		req.Header.Set("User-Agent", profile.UserAgent)
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		client := &http.Client{Timeout: 20 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		var r map[string]interface{}
+		json.Unmarshal(body, &r)
+		return r, nil
+	}
+	baseParams := fmt.Sprintf("session_token=%s&domain=vk.com&adFp=&access_token=", neturl.QueryEscape(captchaErr.SessionToken))
+	vkReq("captchaNotRobot.endSession", baseParams)
+
+	// Логируем общее время
+	totalMs := timing.FetchPowMs + timing.ReadCaptchaMs + timing.SettingsToComponentMs + 
+		timing.ComponentToCheckMs + timing.CheckToEndMs + timing.EndSessionMs + timing.ExtraPauseMs
+	log.Printf("[КАПЧА] VK Smart Captcha решена успешно ✓ (общее время: %.1fс)", float64(totalMs)/1000.0)
+	return successToken, nil
+}
+
+func fetchPowInput(ctx context.Context, redirectUri, userAgent string) (string, int, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", redirectUri, nil)
+	if err != nil {
+		return "", 0, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", 0, err
+	}
+	html := string(body)
+
+	powInputRe := regexp.MustCompile(`const\s+powInput\s*=\s*"([^"]+)"`)
+	powInputMatch := powInputRe.FindStringSubmatch(html)
+	if len(powInputMatch) < 2 {
+		return "", 0, fmt.Errorf("powInput не найден в HTML капчи")
+	}
+	powInput := powInputMatch[1]
+
+	diffRe := regexp.MustCompile(`startsWith\('0'\.repeat\((\d+)\)\)`)
+	diffMatch := diffRe.FindStringSubmatch(html)
+	difficulty := 2
+	if len(diffMatch) >= 2 {
+		if d, err := strconv.Atoi(diffMatch[1]); err == nil {
+			difficulty = d
+		}
+	}
+	return powInput, difficulty, nil
+}
+
+func solvePoW(powInput string, difficulty int) string {
+	target := strings.Repeat("0", difficulty)
+	for nonce := 1; nonce <= 10000000; nonce++ {
+		data := powInput + strconv.Itoa(nonce)
+		hash := sha256.Sum256([]byte(data))
+		hexHash := hex.EncodeToString(hash[:])
+		if strings.HasPrefix(hexHash, target) {
+			return hexHash
+		}
+	}
+	return ""
+}
+
+func callCaptchaNotRobot(ctx context.Context, sessionToken, hash string, profile BotProfile, captchaRng *rand.Rand) (string, error) {
+	// Для решения капчи используем ДЕСКТОПНЫЙ профиль (VK ожидает десктоп на странице капчи)
+	// Это ВАЖНО: если показать десктоп-капчу, но отправить мобильные сенсоры = бан
+	captchaUA := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+	captchaBrowserFP := fmt.Sprintf("%016x%016x", rand.Uint64(), rand.Uint64())
+	captchaDeviceJSON := `{"screenWidth":1920,"screenHeight":1080,"screenAvailWidth":1920,"screenAvailHeight":1032,"innerWidth":1920,"innerHeight":945,"devicePixelRatio":1,"language":"en-US","languages":["en-US"],"webdriver":false,"hardwareConcurrency":16,"deviceMemory":8,"connectionEffectiveType":"4g","notificationsPermission":"denied"}`
+
+	// Курсор: имитируем движение мыши к чекбоксу "Я не робот"
+	captchaCursor := GenerateCaptchaCursor(captchaRng)
+
+	// Downlink: десктопный WiFi (стабильный, высокий)
+	captchaDownlink := GenerateCaptchaDownlink(captchaRng)
+
+	// RTT: десктопный (низкий)
+	captchaRTT := GenerateCaptchaConnectionRtt(captchaRng)
+
+	// Десктоп НЕ имеет акселерометр/гироскоп/тапы
+	captchaAccel := "[]"
+	captchaGyro := "[]"
+	captchaMotion := "[]"
+	captchaTaps := "[]"
+
+	vkReq := func(method string, postData string) (map[string]interface{}, error) {
+		reqURL := "https://api.vk.ru/method/" + method + "?v=5.131"
+		req, err := http.NewRequestWithContext(ctx, "POST", reqURL, strings.NewReader(postData))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", captchaUA)
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Origin", "https://id.vk.ru")
+		req.Header.Set("Referer", "https://id.vk.ru/")
+		req.Header.Set("sec-ch-ua-platform", `"Windows"`)
+		req.Header.Set("sec-ch-ua", `"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"`)
+		req.Header.Set("sec-ch-ua-mobile", "?0")
+		req.Header.Set("Sec-Fetch-Site", "same-site")
+		req.Header.Set("Sec-Fetch-Mode", "cors")
+		req.Header.Set("Sec-Fetch-Dest", "empty")
+		req.Header.Set("DNT", "1")
+		req.Header.Set("Priority", "u=1, i")
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+
+		client := &http.Client{
+			Timeout:   20 * time.Second,
+			Transport: getSharedTransport(),
+		}
+		httpResp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer httpResp.Body.Close()
+
+		body, err := io.ReadAll(httpResp.Body)
+		if err != nil {
+			return nil, err
+		}
+		var resp map[string]interface{}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return nil, err
+		}
+		return resp, nil
+	}
+
+	baseParams := fmt.Sprintf("session_token=%s&domain=vk.com&adFp=&access_token=", neturl.QueryEscape(sessionToken))
+
+	// Генерируем тайминги для ЭТОЙ сессии (5-10 секунд общее время)
+	timing := GenerateCaptchaTiming(captchaRng)
+
+	// --- Шаг 1: settings ---
+	// Реальный браузер: после загрузки страницы отправляет settings
+	log.Printf("[КАПЧА]   Шаг 1/4: settings...")
+	_, err := vkReq("captchaNotRobot.settings", baseParams)
+	if err != nil {
+		return "", fmt.Errorf("settings failed: %w", err)
+	}
+
+	// --- Пауза: человек осматривает виджет капчи перед действием ---
+	log.Printf("[КАПЧА]   ...пауза: изучение виджета (%dмс)...", timing.SettingsToComponentMs)
+	time.Sleep(time.Duration(timing.SettingsToComponentMs) * time.Millisecond)
+
+	// --- Шаг 2: componentDone ---
+	// Человек начинает взаимодействовать (движение мыши к области капчи)
+	log.Printf("[КАПЧА]   Шаг 2/4: componentDone...")
+	componentDoneData := baseParams + fmt.Sprintf("&browser_fp=%s&device=%s", captchaBrowserFP, neturl.QueryEscape(captchaDeviceJSON))
+	_, err = vkReq("captchaNotRobot.componentDone", componentDoneData)
+	if err != nil {
+		return "", fmt.Errorf("componentDone failed: %w", err)
+	}
+
+	// --- Пауза: человек двигает мышь к чекбоксу и кликает ---
+	// ЭТО САМЫЙ ВАЖНЫЙ ШАГ для VK — движение мыши + пауза перед кликом + клик
+	log.Printf("[КАПЧА]   ...пауза: движение мыши к чекбоксу + клик (%dмс)...", timing.ComponentToCheckMs)
+	time.Sleep(time.Duration(timing.ComponentToCheckMs) * time.Millisecond)
+
+	// --- "Человеческая" дополнительная пауза (10% шанс) ---
+	if timing.ExtraPauseMs > 0 {
+		log.Printf("[КАПЧА]   ...дополнительная пауза: человек 'завис' (%dмс)...", timing.ExtraPauseMs)
+		time.Sleep(time.Duration(timing.ExtraPauseMs) * time.Millisecond)
+	}
+
+	// --- Шаг 3: check (главный запрос) ---
+	log.Printf("[КАПЧА]   Шаг 3/4: check...")
+	answer := base64.StdEncoding.EncodeToString([]byte("{}"))
+
+	// Debug info: СТАТИЧНЫЙ для данного устройства (из профиля)
+	debugInfo := profile.DebugInfo
+
+	checkData := baseParams + fmt.Sprintf(
+		"&accelerometer=%s&gyroscope=%s&motion=%s&cursor=%s&taps=%s&connectionRtt=%s&connectionDownlink=%s&browser_fp=%s&hash=%s&answer=%s&debug_info=%s",
+		neturl.QueryEscape(captchaAccel),
+		neturl.QueryEscape(captchaGyro),
+		neturl.QueryEscape(captchaMotion),
+		neturl.QueryEscape(captchaCursor),
+		neturl.QueryEscape(captchaTaps),
+		neturl.QueryEscape(captchaRTT),
+		neturl.QueryEscape(captchaDownlink),
+		captchaBrowserFP,
+		hash,
+		answer,
+		debugInfo,
+	)
+
+	checkResp, err := vkReq("captchaNotRobot.check", checkData)
+	if err != nil {
+		return "", fmt.Errorf("check failed: %w", err)
+	}
+
+	respObj, ok := checkResp["response"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("invalid check response: %v", checkResp)
+	}
+	status, _ := respObj["status"].(string)
+	if status != "OK" {
+		return "", fmt.Errorf("check status: %s", status)
+	}
+	successToken, ok := respObj["success_token"].(string)
+	if !ok || successToken == "" {
+		return "", fmt.Errorf("success_token not found")
+	}
+
+	// --- Пауза перед завершением сессии ---
+	time.Sleep(time.Duration(timing.CheckToEndMs) * time.Millisecond)
+
+	return successToken, nil
+}
+
+// endregion VK Smart Captcha Solver
+
 func getUniqueVKCreds(ctx context.Context, hash string, maxRetries int, stats *Stats) (*Credentials, error) {
 	var lastErr error
+
+	// Уникальный профиль для этого запроса кредов
+	realUA := getUserAgent()
+	actionSeed := uint64(time.Now().UnixNano()) ^ uint64(len(hash))
+	profile := GenerateBotProfile(realUA, hash, actionSeed)
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		select {
@@ -74,7 +428,7 @@ func getUniqueVKCreds(ctx context.Context, hash string, maxRetries int, stats *S
 		case vkSemaphore <- struct{}{}:
 		}
 
-		creds, err := getVKCredsOnce(ctx, hash)
+		creds, err := getVKCredsOnce(ctx, hash, profile)
 		<-vkSemaphore
 
 		if err == nil {
@@ -121,7 +475,7 @@ func min(a, b int) int {
 	return b
 }
 
-func getVKCredsOnce(ctx context.Context, hash string) (*Credentials, error) {
+func getVKCredsOnce(ctx context.Context, hash string, profile BotProfile) (*Credentials, error) {
 	client := &http.Client{
 		Timeout:   15 * time.Second,
 		Transport: getSharedTransport(),
@@ -136,7 +490,7 @@ func getVKCredsOnce(ctx context.Context, hash string) (*Credentials, error) {
 		if err != nil {
 			return nil, fmt.Errorf("создание запроса: %w", err)
 		}
-		req.Header.Set("User-Agent", "Mozilla/5.0")
+		req.Header.Set("User-Agent", profile.UserAgent)
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 		resp, err := client.Do(req)
@@ -154,10 +508,16 @@ func getVKCredsOnce(ctx context.Context, hash string) (*Credentials, error) {
 		if err := json.Unmarshal(body, &m); err != nil {
 			return nil, fmt.Errorf("парсинг JSON: %w | Body: %s", err, string(body))
 		}
-		if errObj, ok := m["error"]; ok {
-			return nil, fmt.Errorf("API error: %v | Body: %s", errObj, string(body))
-		}
+		// Не возвращаем ошибку при наличии "error" — caller сам проверит error_code
 		return m, nil
+	}
+
+	// checkAPIError проверяет наличие ошибки в ответе
+	checkAPIError := func(m map[string]interface{}, step string) error {
+		if errObj, ok := m["error"]; ok {
+			return fmt.Errorf("%s API error: %v", step, errObj)
+		}
+		return nil
 	}
 
 	get := func(m map[string]interface{}, keys ...string) (string, error) {
@@ -184,6 +544,9 @@ func getVKCredsOnce(ctx context.Context, hash string) (*Credentials, error) {
 	if err != nil {
 		return nil, fmt.Errorf("шаг 1: %w", err)
 	}
+	if err := checkAPIError(r, "шаг 1"); err != nil {
+		return nil, err
+	}
 	t1, err := get(r, "data", "access_token")
 	if err != nil {
 		return nil, fmt.Errorf("шаг 1 парсинг: %w", err)
@@ -197,20 +560,79 @@ func getVKCredsOnce(ctx context.Context, hash string) (*Credentials, error) {
 	if err != nil {
 		return nil, fmt.Errorf("шаг 2: %w", err)
 	}
+	if err := checkAPIError(r, "шаг 2"); err != nil {
+		return nil, err
+	}
 	t3, err := get(r, "data", "access_token")
 	if err != nil {
 		return nil, fmt.Errorf("шаг 2 парсинг: %w", err)
 	}
 
-	// 3: get call token используя t3
-	r, err = doReq(fmt.Sprintf(
-		"vk_join_link=https://vk.com/call/join/%s&name=123&access_token=%s",
-		hash, t3,
-	), "https://api.vk.ru/method/calls.getAnonymousToken?v=5.264")
+	// 3: get call token используя t3 (с обработкой капчи — ТОЛЬКО 1 решение)
+	var t4 string
+
+	// Попытка 1: без капчи
+	postData := fmt.Sprintf(
+		"vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s",
+		hash, neturl.QueryEscape(profile.Name), t3,
+	)
+	r, err = doReq(postData, "https://api.vk.ru/method/calls.getAnonymousToken?v=5.264")
 	if err != nil {
 		return nil, fmt.Errorf("шаг 3: %w", err)
 	}
-	t4, err := get(r, "response", "token")
+
+	// Проверяем на капчу
+	if errObj, hasErr := r["error"].(map[string]interface{}); hasErr {
+		errCode, _ := errObj["error_code"].(float64)
+		if errCode == 14 {
+			captchaErr := parseVkCaptchaError(errObj)
+			log.Printf("[КАПЧА] Обнаружена: sid=%s, ts=%s, attempt=%s", captchaErr.CaptchaSid, captchaErr.CaptchaTs, captchaErr.CaptchaAttempt)
+			if captchaErr.SessionToken == "" {
+				return nil, fmt.Errorf("капча без session_token (старый тип)")
+			}
+
+			// Решаем капчу (ТОЛЬКО 1 раз)
+			successToken, solveErr := solveVkCaptcha(ctx, captchaErr, profile)
+			if solveErr != nil {
+				log.Printf("[КАПЧА] ОШИБКА решения: %v", solveErr)
+				return nil, fmt.Errorf("ошибка решения капчи: %w", solveErr)
+			}
+
+			captchaAttemptStr := captchaErr.CaptchaAttempt
+			if captchaAttemptStr == "0" || captchaAttemptStr == "" {
+				captchaAttemptStr = "1"
+			}
+
+			// Повторяем запрос с success_token
+			postData = fmt.Sprintf(
+				"vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s&captcha_ts=%s&captcha_attempt=%s",
+				hash, neturl.QueryEscape(profile.Name), t3, captchaErr.CaptchaSid,
+				neturl.QueryEscape(successToken), captchaErr.CaptchaTs, captchaAttemptStr,
+			)
+			r, err = doReq(postData, "https://api.vk.ru/method/calls.getAnonymousToken?v=5.264")
+			if err != nil {
+				return nil, fmt.Errorf("шаг 3 (после капчи): %w", err)
+			}
+
+			// Если КАПЧА ВСЁ ЕЩЁ требуется — не решаем повторно, фейлим
+			if errObj2, hasErr2 := r["error"].(map[string]interface{}); hasErr2 {
+				errCode2, _ := errObj2["error_code"].(float64)
+				if errCode2 == 14 {
+					// Пауза 30 сек чтобы не долбить ВК
+					time.Sleep(30 * time.Second)
+					log.Printf("[КАПЧА] ОТКАЗ: VK всё ещё требует капчу после решения")
+					return nil, fmt.Errorf("капча не пройдена после решения (пауза 30с)")
+				}
+				log.Printf("[КАПЧА] ОШИБКА после решения: %v", errObj2)
+				return nil, fmt.Errorf("VK API error после капчи: %v", errObj2)
+			}
+			log.Printf("[КАПЧА] УСПЕХ: токен получен после решения капчи")
+		} else {
+			return nil, fmt.Errorf("VK API error: %v", errObj)
+		}
+	}
+
+	t4, err = get(r, "response", "token")
 	if err != nil {
 		return nil, fmt.Errorf("шаг 3 парсинг: %w", err)
 	}
@@ -222,6 +644,9 @@ func getVKCredsOnce(ctx context.Context, hash string) (*Credentials, error) {
 	), "https://calls.okcdn.ru/fb.do")
 	if err != nil {
 		return nil, fmt.Errorf("шаг 4: %w", err)
+	}
+	if err := checkAPIError(r, "шаг 4"); err != nil {
+		return nil, err
 	}
 	t5, err := get(r, "session_key")
 	if err != nil {
@@ -235,6 +660,9 @@ func getVKCredsOnce(ctx context.Context, hash string) (*Credentials, error) {
 	), "https://calls.okcdn.ru/fb.do")
 	if err != nil {
 		return nil, fmt.Errorf("шаг 5: %w", err)
+	}
+	if err := checkAPIError(r, "шаг 5"); err != nil {
+		return nil, err
 	}
 
 	ts, ok := r["turn_server"].(map[string]interface{})

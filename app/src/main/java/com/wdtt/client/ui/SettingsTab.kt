@@ -37,7 +37,7 @@ import kotlinx.coroutines.launch
 import android.content.Intent
 import android.os.Build
 
-private const val WORKERS_PER_GROUP = 8
+private const val WORKERS_PER_GROUP = 12
 
 // Coffee theme colors for protocol chips
 private val CoffeeBrown = Color(0xFF6D4C41)
@@ -633,7 +633,7 @@ fun SecretsDialog(
 ) {
     val scope = rememberCoroutineScope()
     var passwordInput by remember { mutableStateOf(initialPassword) }
-    
+
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             shape = RoundedCornerShape(24.dp),
@@ -669,9 +669,9 @@ fun SecretsDialog(
                         Icon(imageVector = Icons.Default.Close, contentDescription = "Закрыть")
                     }
                 }
-                
+
                 Spacer(modifier = Modifier.height(16.dp))
-                
+
                 OutlinedTextField(
                     value = passwordInput,
                     onValueChange = { passwordInput = it },
@@ -685,9 +685,9 @@ fun SecretsDialog(
                         unfocusedContainerColor = MaterialTheme.colorScheme.surface
                     )
                 )
-                
-                Spacer(modifier = Modifier.height(24.dp))
-                
+
+                Spacer(modifier = Modifier.height(16.dp))
+
                 Button(
                     onClick = {
                         scope.launch {

@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -41,6 +42,7 @@ object TunnelManager {
     private var activeHashIndex = 0 // 0: primary, 1: secondary
     private var currentParams: TunnelParams? = null
     private var lastContext: Context? = null
+    private var forceRegenerateUA = false // принудительная перегенерация UA при ошибках
 
     val running = MutableStateFlow(false)
     val logs = MutableStateFlow<List<LogEntry>>(emptyList())
@@ -104,6 +106,7 @@ object TunnelManager {
             activeHashIndex = 0
             currentParams = params
             lastContext = appContext
+            forceRegenerateUA = false
         }
         
         wgHelper = WireGuardHelper(appContext)
@@ -154,7 +157,7 @@ object TunnelManager {
                     cmd.add(params.sni)
                 }
 
-                // Передаем ANDROID_ID
+                // User-Agent: загружаем из настроек или генерируем новый
                 val androidId = android.provider.Settings.Secure.getString(context.contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: "unknown"
                 cmd.add("-device-id")
                 cmd.add(androidId)
@@ -166,6 +169,17 @@ object TunnelManager {
 
                 // Protocol selection from UI
                 cmd.add(if (params.protocol == "tcp") "-tcp" else "-udp")
+
+                val settingsStore = SettingsStore(appContext)
+                var userAgent = settingsStore.userAgent.first()
+                if (userAgent.isEmpty() || forceRegenerateUA) {
+                    userAgent = UserAgentGenerator.generateForDevice(androidId)
+                    settingsStore.saveUserAgent(userAgent)
+                    forceRegenerateUA = false
+                    updateLog("ua_generated", "[UA] Сгенерирован новый User-Agent", 50)
+                }
+                cmd.add("-user-agent")
+                cmd.add(userAgent)
 
                 val pb = ProcessBuilder(cmd)
                 pb.directory(context.filesDir) // Устанавливаем рабочую директорию
@@ -278,15 +292,21 @@ object TunnelManager {
 
                     // 2. Этапы подключения и Ошибки
                     when {
-                        lineTrim.contains("Старт") || lineTrim.contains("Ожидайте") -> 
+                        lineTrim.contains("Старт") || lineTrim.contains("Ожидайте") ->
                             updateLog("creds_start", "[ВК] Получение учетных данных...", 0, false)
-                        lineTrim.contains("Креды OK") || lineTrim.contains("Первые креды") -> 
+                        lineTrim.contains("Креды OK") || lineTrim.contains("Первые креды") ->
                             updateLog("creds_ok", "[ВК] Учетные данные получены ✓", 0, false)
-                        lineTrim.contains("Relay:") -> 
+                        lineTrim.contains("Решаю VK Smart Captcha") ->
+                            updateLog("captcha_solving", "[КАПЧА] Автоматическое решение капчи...", 0, false)
+                        lineTrim.contains("Smart Captcha решена") ->
+                            updateLog("captcha_solved", "[КАПЧА] Капча решена успешно ✓", 0, false)
+                        lineTrim.contains("капча не решена") || lineTrim.contains("ошибка решения капчи") ->
+                            updateLog("captcha_failed", "[КАПЧА] Ошибка решения капчи", 99, true)
+                        lineTrim.contains("Relay:") ->
                             updateLog("dtls_start", "[DTLS] Рукопожатие (Handshake)...", 1, false)
-                        lineTrim.contains("DTLS ОК") -> 
+                        lineTrim.contains("DTLS ОК") ->
                             updateLog("dtls_ok", "[DTLS] Соединение установлено ✓", 1, false)
-                        lineTrim.contains("Активна ✓") -> 
+                        lineTrim.contains("Активна ✓") ->
                             updateLog("ready", "[READY] Туннель готов к работе ✓", 2, false)
                         
                         // Ошибки (в конец)
@@ -347,9 +367,10 @@ object TunnelManager {
     private fun handleHashError() {
         val params = currentParams ?: return
         val context = lastContext ?: return
-        
+
         currentHashErrorCount = 0
-        
+        forceRegenerateUA = true // Перегенерируем UA при следующих ошибках
+
         if (params.secondaryVkHash.isNotEmpty() && activeHashIndex == 0) {
             updateLog("hash_switch", "Основной хеш мертв. Переключение на запасной...", 50, true)
             activeHashIndex = 1
@@ -375,6 +396,7 @@ object TunnelManager {
                     // Go-процесс мёртв!
                     updateLog("watchdog", "⚠ Процесс упал. Перезапуск...", 50, true)
                     activeWorkers.value = 0
+                    forceRegenerateUA = true
                     killProcess()
                     delay(2000)
                     if (running.value) {
@@ -390,6 +412,7 @@ object TunnelManager {
                         zeroWorkersSince = System.currentTimeMillis()
                     } else if (System.currentTimeMillis() - zeroWorkersSince > 30_000) {
                         updateLog("watchdog", "⚠ Зомби-процесс (0 воркеров 30с). Перезапуск...", 50, true)
+                        forceRegenerateUA = true
                         killProcess()
                         delay(2000)
                         if (running.value) {

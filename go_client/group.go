@@ -12,9 +12,9 @@ import (
 )
 
 const (
-	workersPerGroup = 8
-	cycleSecs       = 600 // 10 minutes
-	phaseStepSec    = 6   // 6s shift between groups to ensure fast startup
+	workersPerGroup = 12
+	cycleSecs       = 840 // 
+	phaseStepSec    = 16  // 
 )
 
 // WorkerGroup:
@@ -167,7 +167,7 @@ func WorkerGroup(
 							return
 						}
 						errStr := sessErr.Error()
-						
+
 						// Дописываем понятные пояснения для типичных ошибок со стороны балансировщиков ВК
 						errStrLower := strings.ToLower(errStr)
 						if strings.Contains(errStrLower, "attribute not found") ||

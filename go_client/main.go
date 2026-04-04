@@ -77,7 +77,7 @@ func main() {
 	vkHash := flag.String("vk", "", "хеши VK-звонков (через запятую)")
 	secondaryHash := flag.String("vk2", "", "запасной VK хеш")
 	peerAddr := flag.String("peer", "", "адрес:порт VPS сервера")
-	numW := flag.Int("n", 16, "количество воркеров (кратно 8)")
+	numW := flag.Int("n", 24, "количество воркеров (кратно 12)")
 	useTCP := flag.Bool("tcp", false, "TURN через TCP")
 	useUDP := flag.Bool("udp", false, "TURN через UDP")
 	splitTunnel := flag.Bool("split", false, "split tunneling")
@@ -88,6 +88,7 @@ func main() {
 	appSecret := flag.String("vk-app-secret", "QbYic1K3lEV5kTGiqlq2", "VK App Secret")
 
 	deviceID := flag.String("device-id", "unknown", "уникальный ID устройства")
+	userAgent := flag.String("user-agent", "", "User-Agent строка устройства")
 	connPassword := flag.String("password", "", "пароль подключения")
 
 	flag.Parse()
@@ -95,6 +96,7 @@ func main() {
 	vkAppID.Store(*appID)
 	vkAppSecret.Store(*appSecret)
 	noDnsFlag.Store(*noDns)
+	SetUserAgent(*userAgent)
 
 	if *peerAddr == "" || *vkHash == "" {
 		log.Fatal("[КЛИЕНТ] Нужны -peer и -vk")
