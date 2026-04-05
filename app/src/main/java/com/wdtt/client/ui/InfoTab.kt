@@ -225,7 +225,7 @@ fun InfoTab() {
             title = "Замотивировать разработчика",
             buttonText = "",
             iconPainter = painterResource(id = R.drawable.ic_yoomoney),
-            url = "https://yoomoney.ru/to/4100119505530465/30",
+            url = "заменить",
             buttonColor = Color(0xFF8B3FFD),
             textColor = Color.White,
             isHighlighted = true
