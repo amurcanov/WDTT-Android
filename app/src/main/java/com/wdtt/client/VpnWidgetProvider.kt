@@ -158,7 +158,7 @@ class VpnWidgetProvider : AppWidgetProvider() {
             putExtra("workers_per_hash", profile?.workers ?: store.workersPerHash.first())
             putExtra("port", localPort)
             putExtra("sni", store.sni.first())
-            putExtra("connection_password", store.connectionPassword.first())
+            putExtra("connection_password", password)
             putExtra("protocol", store.protocol.first())
             putExtra("vk_auth_mode", store.vkAuthMode.first())
             putExtra("captcha_mode", store.captchaMode.first())

@@ -486,6 +486,7 @@ class SettingsStore(context: Context) {
     suspend fun activeConnectionProfile(): ConnectionProfile? {
         val prefs = dataStore.data.first()
         val profile = prefs[ACTIVE_PROFILE] ?: 0
+        if (prefs[getProfileKey(WDTT_LINK_MODE, profile)] != true) return null
         val profiles = ConnectionProfile.decodeList(
             secureStore.decrypt(prefs[getProfileKey(CONNECTION_PROFILES_ENCRYPTED, profile)]).orEmpty()
         )
