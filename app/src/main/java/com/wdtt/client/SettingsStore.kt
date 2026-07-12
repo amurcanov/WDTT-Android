@@ -449,9 +449,11 @@ class SettingsStore(context: Context) {
             val activeSettingsProfile = prefs[ACTIVE_PROFILE] ?: 0
             val profilesKey = getProfileKey(CONNECTION_PROFILES_ENCRYPTED, activeSettingsProfile)
             val current = ConnectionProfile.decodeList(secureStore.decrypt(prefs[profilesKey]).orEmpty())
-            val updated = current.map { profile ->
-                if (profile.id == id) profile.copy(workers = normalizeConnectionProfileWorkers(workers)) else profile
-            }
+            val index = current.indexOfFirst { it.id == id }
+            if (index < 0) return@edit
+
+            val updated = current.toMutableList()
+            updated[index] = current[index].copy(workers = normalizeConnectionProfileWorkers(workers))
             prefs[profilesKey] = secureStore.encrypt(ConnectionProfile.encodeList(updated))
         }
     }

@@ -100,8 +100,16 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
     val wdttLinkMode by settingsStore.wdttLinkMode.collectAsStateWithLifecycle(initialValue = false)
     val connectionProfiles by settingsStore.connectionProfiles.collectAsStateWithLifecycle(initialValue = emptyList())
     val activeConnectionProfileId by settingsStore.activeConnectionProfileId.collectAsStateWithLifecycle(initialValue = "")
-    val selectedConnectionProfile = connectionProfiles.firstOrNull { it.id == activeConnectionProfileId }
-        ?: connectionProfiles.firstOrNull()
+    var pendingConnectionProfileId by rememberSaveable { mutableStateOf<String?>(null) }
+    val selectedConnectionProfileId = pendingConnectionProfileId
+        ?: activeConnectionProfileId.ifBlank { connectionProfiles.firstOrNull()?.id.orEmpty() }
+    val selectedConnectionProfile = connectionProfiles.firstOrNull { it.id == selectedConnectionProfileId }
+
+    LaunchedEffect(activeConnectionProfileId, pendingConnectionProfileId) {
+        if (pendingConnectionProfileId == activeConnectionProfileId) {
+            pendingConnectionProfileId = null
+        }
+    }
 
     val activeFingerprint by settingsStore.selectedFingerprint.collectAsStateWithLifecycle(initialValue = "firefox")
     val activeClientIds by settingsStore.activeClientIds.collectAsStateWithLifecycle(initialValue = "8202606,6287487")
@@ -139,8 +147,9 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
     var showConnectionImport by rememberSaveable { mutableStateOf(false) }
     var connectionImportText by rememberSaveable { mutableStateOf("") }
     var connectionImportError by rememberSaveable { mutableStateOf("") }
-    var detailsProfile by remember { mutableStateOf<ConnectionProfile?>(null) }
+    var detailsProfileId by rememberSaveable { mutableStateOf<String?>(null) }
     var profileSwitching by remember { mutableStateOf(false) }
+    val detailsProfile = connectionProfiles.firstOrNull { it.id == detailsProfileId }
 
     val allHashes = remember(vkHash1, vkHash2, vkHash3, vkHash4) { listOf(vkHash1, vkHash2, vkHash3, vkHash4) }
     val uniqueHashes = remember(vkHash1, vkHash2, vkHash3, vkHash4) { allHashes.filter { it.isNotBlank() && it.length >= 16 }.distinct() }
@@ -262,6 +271,7 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
     }
 
     var saveJob by remember { mutableStateOf<Job?>(null) }
+    var profileWorkersSaveJob by remember { mutableStateOf<Job?>(null) }
 
     fun saveTunnelSettingsNow(hashes: String = combinedHashes, onSaved: (() -> Unit)? = null) {
         saveJob?.cancel()
@@ -431,6 +441,7 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
                 TextButton(onClick = {
                     val imported = runCatching { ConnectionProfileParser.parse(connectionImportText) }
                     imported.onSuccess { profile ->
+                        pendingConnectionProfileId = profile.id
                         scope.launch { settingsStore.saveConnectionProfile(profile) }
                         connectionImportError = ""
                         connectionImportText = ""
@@ -444,7 +455,7 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
 
     detailsProfile?.let { profile ->
         AlertDialog(
-            onDismissRequest = { detailsProfile = null },
+            onDismissRequest = { detailsProfileId = null },
             title = { Text(profile.name) },
             text = {
                 Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -463,11 +474,12 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { detailsProfile = null }) { Text("Готово") } },
+            confirmButton = { TextButton(onClick = { detailsProfileId = null }) { Text("Готово") } },
             dismissButton = {
                 TextButton(onClick = {
                     scope.launch { settingsStore.removeConnectionProfile(profile.id) }
-                    detailsProfile = null
+                    if (pendingConnectionProfileId == profile.id) pendingConnectionProfileId = null
+                    detailsProfileId = null
                 }) { Icon(Icons.Default.Delete, contentDescription = "Удалить конфиг") }
             }
         )
@@ -570,11 +582,11 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
 
                     Spacer(Modifier.height(4.dp))
 
-                    val maxWorkers = if (isProfileWorkersMode) 27f else dynamicMaxWorkers
-                    val minWorkers = WORKERS_PER_GROUP.toFloat()
+                    val maxWorkers = if (isProfileWorkersMode) 108f else dynamicMaxWorkers
+                    val minWorkers = if (isProfileWorkersMode) 1f else WORKERS_PER_GROUP.toFloat()
                     val currentWorkersVal = roundToGroup(
                         currentWorkers.coerceIn(minWorkers, maxWorkers),
-                        WORKERS_PER_GROUP.toFloat()
+                        if (isProfileWorkersMode) 1f else WORKERS_PER_GROUP.toFloat()
                     )
 
                     CompactSteppedSlider(
@@ -584,10 +596,12 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
                                 val workers = normalizeConnectionProfileWorkers(raw.toInt())
                                 profileWorkersInput = workers.toFloat()
                                 selectedConnectionProfile?.let { profile ->
-                                    saveJob?.cancel()
-                                    saveJob = scope.launch {
-                                        delay(300)
-                                        settingsStore.updateConnectionProfileWorkers(profile.id, workers)
+                                    if (profile.workers == workers) return@let
+                                    val profileId = profile.id
+                                    profileWorkersSaveJob?.cancel()
+                                    profileWorkersSaveJob = scope.launch {
+                                        delay(150)
+                                        settingsStore.updateConnectionProfileWorkers(profileId, workers)
                                     }
                                 }
                             } else {
@@ -596,7 +610,7 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
                             }
                         },
                         valueRange = minWorkers..maxWorkers,
-                        stepSize = WORKERS_PER_GROUP.toFloat(),
+                        stepSize = if (isProfileWorkersMode) 1f else WORKERS_PER_GROUP.toFloat(),
                         enabled = !tunnelRunning,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -857,13 +871,14 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
                                 Text("Добавьте ссылку wdtt:// или vkturnproxy://", color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             connectionProfiles.forEach { profile ->
-                                val selected = profile.id == selectedConnectionProfile?.id
+                                val selected = profile.id == selectedConnectionProfileId
                                 Surface(
                                     modifier = Modifier.fillMaxWidth(),
                                     shape = RoundedCornerShape(12.dp),
                                     color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
                                     onClick = {
-                                        if (profile.id != selectedConnectionProfile?.id && !profileSwitching) {
+                                        if (profile.id != selectedConnectionProfileId && !profileSwitching) {
+                                            pendingConnectionProfileId = profile.id
                                             scope.launch {
                                                 profileSwitching = true
                                                 try {
@@ -891,7 +906,7 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
                                         }
-                                        IconButton(onClick = { detailsProfile = profile }) {
+                                        IconButton(onClick = { detailsProfileId = profile.id }) {
                                             Icon(Icons.Default.Info, contentDescription = "Параметры конфига")
                                         }
                                     }
@@ -1031,6 +1046,7 @@ private fun CompactSteppedSlider(
     enabled: Boolean,
     modifier: Modifier = Modifier
 ) {
+    val latestOnValueChange by rememberUpdatedState(onValueChange)
     val activeColor = MaterialTheme.colorScheme.primary.copy(alpha = if (enabled) 1f else 0.38f)
     val inactiveColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (enabled) 1f else 0.55f)
     val thumbStrokeColor = MaterialTheme.colorScheme.surface
@@ -1058,13 +1074,13 @@ private fun CompactSteppedSlider(
             .pointerInput(enabled, valueRange, stepSize) {
                 if (!enabled) return@pointerInput
                 detectTapGestures { offset ->
-                    onValueChange(positionToValue(offset.x, size.width.toFloat()))
+                    latestOnValueChange(positionToValue(offset.x, size.width.toFloat()))
                 }
             }
             .pointerInput(enabled, valueRange, stepSize) {
                 if (!enabled) return@pointerInput
                 detectDragGestures { change, _ ->
-                    onValueChange(positionToValue(change.position.x, size.width.toFloat()))
+                    latestOnValueChange(positionToValue(change.position.x, size.width.toFloat()))
                 }
             }
     ) {

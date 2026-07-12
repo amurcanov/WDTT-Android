@@ -12,7 +12,7 @@ enum class ConnectionMode(val label: String) {
 }
 
 fun normalizeConnectionProfileWorkers(value: Int): Int =
-    (value.coerceIn(9, 27) / 9) * 9
+    value.coerceIn(1, 108)
 
 data class ConnectionProfile(
     val id: String = UUID.randomUUID().toString(),
