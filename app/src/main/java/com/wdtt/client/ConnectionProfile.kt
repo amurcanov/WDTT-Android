@@ -11,6 +11,9 @@ enum class ConnectionMode(val label: String) {
     WRAP_S("SRTP-WRAP-S")
 }
 
+fun normalizeConnectionProfileWorkers(value: Int): Int =
+    (value.coerceIn(9, 27) / 9) * 9
+
 data class ConnectionProfile(
     val id: String = UUID.randomUUID().toString(),
     val name: String,
@@ -58,7 +61,7 @@ data class ConnectionProfile(
                 peer = json.optString("peer"),
                 vkLinks = json.optString("vkLinks"),
                 localPort = json.optInt("localPort", 9000).coerceIn(1, 65535),
-                workers = json.optInt("workers", 18).coerceIn(9, 108),
+                workers = normalizeConnectionProfileWorkers(json.optInt("workers", 18)),
                 wrapAPassword = json.optString("wrapAPassword"),
                 obfKey = json.optString("obfKey"),
                 obfProfile = json.optString("obfProfile", "rtpopus3"),
@@ -149,7 +152,7 @@ object ConnectionProfileParser {
                 peer = peer,
                 vkLinks = settings.stringValue("vkLink"),
                 localPort = 9000,
-                workers = settings.optInt("numConnections", 18).coerceIn(9, 108),
+                workers = normalizeConnectionProfileWorkers(settings.optInt("numConnections", 18)),
                 wrapAPassword = settings.stringValue("wrapAPassword"),
                 sourceLink = raw
             )
@@ -207,7 +210,7 @@ object ConnectionProfileParser {
             peer = peer,
             vkLinks = vkLinks,
             localPort = 9000,
-            workers = workers.coerceIn(9, 108),
+            workers = normalizeConnectionProfileWorkers(workers),
             obfKey = obfKey.lowercase(),
             obfProfile = obfProfile,
             clientId = clientId.ifBlank { UUID.randomUUID().toString() },
