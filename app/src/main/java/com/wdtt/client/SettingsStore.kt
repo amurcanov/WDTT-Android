@@ -444,6 +444,18 @@ class SettingsStore(context: Context) {
         }
     }
 
+    suspend fun updateConnectionProfileWorkers(id: String, workers: Int) {
+        dataStore.edit { prefs ->
+            val activeSettingsProfile = prefs[ACTIVE_PROFILE] ?: 0
+            val profilesKey = getProfileKey(CONNECTION_PROFILES_ENCRYPTED, activeSettingsProfile)
+            val current = ConnectionProfile.decodeList(secureStore.decrypt(prefs[profilesKey]).orEmpty())
+            val updated = current.map { profile ->
+                if (profile.id == id) profile.copy(workers = normalizeConnectionProfileWorkers(workers)) else profile
+            }
+            prefs[profilesKey] = secureStore.encrypt(ConnectionProfile.encodeList(updated))
+        }
+    }
+
     suspend fun selectConnectionProfile(id: String) {
         dataStore.edit { prefs ->
             val profile = prefs[ACTIVE_PROFILE] ?: 0

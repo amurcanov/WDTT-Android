@@ -48,11 +48,13 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wdtt.client.SettingsStore
+import com.wdtt.client.ConnectionMode
 import com.wdtt.client.ConnectionProfile
 import com.wdtt.client.ConnectionProfileParser
 import com.wdtt.client.TunnelManager
 import com.wdtt.client.TunnelService
 import com.wdtt.client.WDTTColors
+import com.wdtt.client.normalizeConnectionProfileWorkers
 import com.wdtt.client.ui.dialogs.HashesDialog
 import com.wdtt.client.ui.dialogs.SecretsDialog
 import com.wdtt.client.ui.utils.stripVkUrlStatic
@@ -123,6 +125,7 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
     var vkHash3 by rememberSaveable { mutableStateOf("") }
     var vkHash4 by rememberSaveable { mutableStateOf("") }
     var workersInput by rememberSaveable { mutableFloatStateOf(18f) }
+    var profileWorkersInput by rememberSaveable { mutableFloatStateOf(18f) }
     var showHashesDialog by rememberSaveable { mutableStateOf(false) }
     var useVKCallsAuth by rememberSaveable { mutableStateOf(true) }
     var obfsMode by rememberSaveable { mutableStateOf("audio") }
@@ -156,13 +159,22 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
     var portInput by rememberSaveable { mutableStateOf("9000") }
     var sniInput by rememberSaveable { mutableStateOf("") }
 
-    LaunchedEffect(dynamicMaxWorkers) {
-        if (workersInput > dynamicMaxWorkers) {
+    LaunchedEffect(dynamicMaxWorkers, wdttLinkMode) {
+        if (!wdttLinkMode && workersInput > dynamicMaxWorkers) {
             workersInput = dynamicMaxWorkers
         }
     }
 
-    val currentWorkers = workersInput.coerceIn(WORKERS_PER_GROUP.toFloat(), dynamicMaxWorkers)
+    LaunchedEffect(selectedConnectionProfile?.id, selectedConnectionProfile?.workers) {
+        profileWorkersInput = normalizeConnectionProfileWorkers(selectedConnectionProfile?.workers ?: 18).toFloat()
+    }
+
+    val isProfileWorkersMode = wdttLinkMode && selectedConnectionProfile != null
+    val currentWorkers = if (isProfileWorkersMode) {
+        profileWorkersInput
+    } else {
+        workersInput.coerceIn(WORKERS_PER_GROUP.toFloat(), dynamicMaxWorkers)
+    }
 
     val hashErrors = remember(vkHash1, vkHash2, vkHash3, vkHash4) {
         buildList {
@@ -544,7 +556,7 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            "Мощность",
+                            if (isProfileWorkersMode) "Потоки конфигурации" else "Мощность",
                             style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.primary,
                             fontWeight = FontWeight.SemiBold
@@ -558,15 +570,30 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
 
                     Spacer(Modifier.height(4.dp))
 
-                    val maxWorkers = dynamicMaxWorkers
+                    val maxWorkers = if (isProfileWorkersMode) 27f else dynamicMaxWorkers
                     val minWorkers = WORKERS_PER_GROUP.toFloat()
-                    val currentWorkersVal = roundToGroup(currentWorkers.coerceIn(minWorkers, maxWorkers), maxWorkers)
+                    val currentWorkersVal = roundToGroup(
+                        currentWorkers.coerceIn(minWorkers, maxWorkers),
+                        WORKERS_PER_GROUP.toFloat()
+                    )
 
                     CompactSteppedSlider(
                         value = currentWorkersVal,
                         onValueChange = { raw ->
-                            workersInput = roundToGroup(raw, maxWorkers)
-                            scheduleSave()
+                            if (isProfileWorkersMode) {
+                                val workers = normalizeConnectionProfileWorkers(raw.toInt())
+                                profileWorkersInput = workers.toFloat()
+                                selectedConnectionProfile?.let { profile ->
+                                    saveJob?.cancel()
+                                    saveJob = scope.launch {
+                                        delay(300)
+                                        settingsStore.updateConnectionProfileWorkers(profile.id, workers)
+                                    }
+                                }
+                            } else {
+                                workersInput = roundToGroup(raw, maxWorkers)
+                                scheduleSave()
+                            }
                         },
                         valueRange = minWorkers..maxWorkers,
                         stepSize = WORKERS_PER_GROUP.toFloat(),
@@ -605,25 +632,45 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
                     }
 
                     
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            "Маскировка",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            ProtocolChip("Аудио", obfsMode == "audio", enabled = !tunnelRunning) {
-                                obfsMode = "audio"
-                                scope.launch { settingsStore.saveObfsMode("audio") }
-                            }
-                            ProtocolChip("Видео", obfsMode == "video", enabled = !tunnelRunning) {
-                                obfsMode = "video"
-                                scope.launch { settingsStore.saveObfsMode("video") }
+                    if (wdttLinkMode && selectedConnectionProfile?.mode == ConnectionMode.WRAP_S) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                "Маскировка",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                selectedConnectionProfile?.obfProfile.orEmpty(),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                "Маскировка",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                ProtocolChip("Аудио", obfsMode == "audio", enabled = !tunnelRunning) {
+                                    obfsMode = "audio"
+                                    scope.launch { settingsStore.saveObfsMode("audio") }
+                                }
+                                ProtocolChip("Видео", obfsMode == "video", enabled = !tunnelRunning) {
+                                    obfsMode = "video"
+                                    scope.launch { settingsStore.saveObfsMode("video") }
+                                }
                             }
                         }
                     }
