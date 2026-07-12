@@ -418,7 +418,7 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
                         value = connectionImportText,
                         onValueChange = { connectionImportText = it.trim() },
                         label = { Text("Ссылка подключения") },
-                        supportingText = { Text("wdtt://, vkturnproxy:// или freeturn://") },
+                        supportingText = { Text("wdtt:// или vkturnproxy://") },
                         minLines = 3,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -854,7 +854,7 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
                                 }
                             }
                             if (connectionProfiles.isEmpty()) {
-                                Text("Добавьте ссылку wdtt://, vkturnproxy:// или freeturn://", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("Добавьте ссылку wdtt:// или vkturnproxy://", color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             connectionProfiles.forEach { profile ->
                                 val selected = profile.id == selectedConnectionProfile?.id

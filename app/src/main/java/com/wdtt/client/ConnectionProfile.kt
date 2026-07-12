@@ -93,8 +93,10 @@ object ConnectionProfileParser {
         return when (Uri.parse(raw).scheme?.lowercase()) {
             "wdtt" -> parseWdtt(raw)
             "vkturnproxy" -> parseVkTurnProxy(raw)
-            "freeturn" -> parseFreeTurn(raw)
-            else -> throw IllegalArgumentException("Поддерживаются ссылки wdtt://, vkturnproxy:// и freeturn://")
+            "freeturn" -> throw IllegalArgumentException(
+                "freeturn:// не содержит VK-ссылку и WireGuard-конфиг; используйте vkturnproxy://"
+            )
+            else -> throw IllegalArgumentException("Поддерживаются ссылки wdtt:// и vkturnproxy://")
         }
     }
 
@@ -158,29 +160,6 @@ object ConnectionProfileParser {
             )
             else -> throw IllegalArgumentException("vkturnproxy:// не содержит SRTP-WRAP-A или SRTP-WRAP-S")
         }
-    }
-
-    private fun parseFreeTurn(raw: String): ConnectionProfile {
-        val encoded = raw.removePrefix("freeturn://").trimEnd('/')
-        require(encoded.isNotBlank()) { "В freeturn:// отсутствуют данные" }
-        val json = JSONObject(decodeBase64Url(encoded).toString(Charsets.UTF_8))
-        val version = json.optInt("v", 1)
-        require(version == 1) { "Неподдерживаемая версия freeturn://: $version" }
-        val peer = json.stringValue("peer")
-        require(peer.isNotBlank()) { "В freeturn:// не указан адрес сервера" }
-        return freeTurnProfile(
-            peer = peer,
-            vkLinks = "",
-            workers = json.optInt("n", 18),
-            obfKey = json.stringValue("key"),
-            obfProfile = json.stringValue("obf").ifBlank { "rtpopus3" },
-            clientId = json.stringValue("cid"),
-            privateKey = "",
-            peerPublicKey = "",
-            tunnelAddress = "",
-            dnsServers = json.stringValue("dnss"),
-            raw = raw
-        )
     }
 
     private fun freeTurnProfile(
