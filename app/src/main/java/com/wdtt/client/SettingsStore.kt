@@ -28,6 +28,8 @@ class SettingsStore(context: Context) {
         private val LOGGING_ENABLED = booleanPreferencesKey("logging_enabled")
         private val WDTT_LINK = stringPreferencesKey("wdtt_link")
         private val WDTT_LINK_MODE = booleanPreferencesKey("wdtt_link_mode")
+        private val CONNECTION_PROFILES_ENCRYPTED = stringPreferencesKey("connection_profiles_encrypted")
+        private val ACTIVE_CONNECTION_PROFILE_ID = stringPreferencesKey("active_connection_profile_id")
 
         private val PEER = stringPreferencesKey("peer")
         private val VK_HASHES = stringPreferencesKey("vk_hashes")
@@ -109,7 +111,7 @@ class SettingsStore(context: Context) {
             val newName = "${baseKey.name}_$profile"
             @Suppress("UNCHECKED_CAST")
             return when (baseKey) {
-                PEER, VK_HASHES, SECONDARY_VK_HASH, PROTOCOL, SNI, USER_AGENT, DEPLOY_IP, DEPLOY_LOGIN, DEPLOY_PASSWORD, DEPLOY_PASSWORD_ENCRYPTED, DEPLOY_SSH_PORT, DEPLOY_DNS1, DEPLOY_DNS2, EXCLUDED_APPS, CONNECTION_PASSWORD, CONNECTION_PASSWORD_ENCRYPTED, DEPLOY_MAIN_PASSWORD, DEPLOY_MAIN_PASSWORD_ENCRYPTED, DEPLOY_ADMIN_ID, DEPLOY_ADMIN_ID_ENCRYPTED, DEPLOY_BOT_TOKEN, DEPLOY_BOT_TOKEN_ENCRYPTED, PROXY_MODE, PROXY_HOST, VK_AUTH_MODE, OBFS_MODE, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, WDTT_LINK, SELECTED_FINGERPRINT, ACTIVE_CLIENT_IDS -> stringPreferencesKey(newName) as Preferences.Key<T>
+                PEER, VK_HASHES, SECONDARY_VK_HASH, PROTOCOL, SNI, USER_AGENT, DEPLOY_IP, DEPLOY_LOGIN, DEPLOY_PASSWORD, DEPLOY_PASSWORD_ENCRYPTED, DEPLOY_SSH_PORT, DEPLOY_DNS1, DEPLOY_DNS2, EXCLUDED_APPS, CONNECTION_PASSWORD, CONNECTION_PASSWORD_ENCRYPTED, DEPLOY_MAIN_PASSWORD, DEPLOY_MAIN_PASSWORD_ENCRYPTED, DEPLOY_ADMIN_ID, DEPLOY_ADMIN_ID_ENCRYPTED, DEPLOY_BOT_TOKEN, DEPLOY_BOT_TOKEN_ENCRYPTED, PROXY_MODE, PROXY_HOST, VK_AUTH_MODE, OBFS_MODE, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, WDTT_LINK, CONNECTION_PROFILES_ENCRYPTED, ACTIVE_CONNECTION_PROFILE_ID, SELECTED_FINGERPRINT, ACTIVE_CLIENT_IDS -> stringPreferencesKey(newName) as Preferences.Key<T>
                 WORKERS_PER_HASH, LISTEN_PORT, SERVER_DTLS_PORT, SERVER_WG_PORT, PROXY_PORT -> intPreferencesKey(newName) as Preferences.Key<T>
                 MANUAL_PORTS_ENABLED, NO_DTLS, NO_DNS, IS_WHITELIST, WDTT_LINK_MODE, DETAILED_LOGS -> booleanPreferencesKey(newName) as Preferences.Key<T>
                 else -> throw IllegalArgumentException("Unsupported key type: ${baseKey.name}")
@@ -124,6 +126,7 @@ class SettingsStore(context: Context) {
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             migrateSecretsToKeystore()
             migrateLegacyWhitelistMode()
+            migrateLegacyWdttLink()
         }
     }
 
@@ -137,6 +140,15 @@ class SettingsStore(context: Context) {
     val wdttLinkMode: Flow<Boolean> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         prefs[getProfileKey(WDTT_LINK_MODE, profile)] ?: false
+    }
+    val connectionProfiles: Flow<List<ConnectionProfile>> = dataStore.data.map { prefs ->
+        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val encrypted = prefs[getProfileKey(CONNECTION_PROFILES_ENCRYPTED, profile)]
+        ConnectionProfile.decodeList(secureStore.decrypt(encrypted).orEmpty())
+    }
+    val activeConnectionProfileId: Flow<String> = dataStore.data.map { prefs ->
+        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        prefs[getProfileKey(ACTIVE_CONNECTION_PROFILE_ID, profile)] ?: ""
     }
 
     val peer: Flow<String> = dataStore.data.map { prefs ->
@@ -420,6 +432,55 @@ class SettingsStore(context: Context) {
         }
     }
 
+    suspend fun saveConnectionProfile(profile: ConnectionProfile) {
+        dataStore.edit { prefs ->
+            val activeSettingsProfile = prefs[ACTIVE_PROFILE] ?: 0
+            val profilesKey = getProfileKey(CONNECTION_PROFILES_ENCRYPTED, activeSettingsProfile)
+            val current = ConnectionProfile.decodeList(secureStore.decrypt(prefs[profilesKey]).orEmpty())
+            val updated = current.filterNot { it.id == profile.id || it.sourceLink == profile.sourceLink } + profile
+            prefs[profilesKey] = secureStore.encrypt(ConnectionProfile.encodeList(updated))
+            prefs[getProfileKey(ACTIVE_CONNECTION_PROFILE_ID, activeSettingsProfile)] = profile.id
+            prefs[getProfileKey(WDTT_LINK_MODE, activeSettingsProfile)] = true
+        }
+    }
+
+    suspend fun selectConnectionProfile(id: String) {
+        dataStore.edit { prefs ->
+            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            prefs[getProfileKey(ACTIVE_CONNECTION_PROFILE_ID, profile)] = id
+            prefs[getProfileKey(WDTT_LINK_MODE, profile)] = true
+        }
+    }
+
+    suspend fun removeConnectionProfile(id: String) {
+        dataStore.edit { prefs ->
+            val activeSettingsProfile = prefs[ACTIVE_PROFILE] ?: 0
+            val profilesKey = getProfileKey(CONNECTION_PROFILES_ENCRYPTED, activeSettingsProfile)
+            val updated = ConnectionProfile.decodeList(secureStore.decrypt(prefs[profilesKey]).orEmpty())
+                .filterNot { it.id == id }
+            if (updated.isEmpty()) {
+                prefs.remove(profilesKey)
+                prefs.remove(getProfileKey(ACTIVE_CONNECTION_PROFILE_ID, activeSettingsProfile))
+            } else {
+                prefs[profilesKey] = secureStore.encrypt(ConnectionProfile.encodeList(updated))
+                val selected = prefs[getProfileKey(ACTIVE_CONNECTION_PROFILE_ID, activeSettingsProfile)]
+                if (selected == id) {
+                    prefs[getProfileKey(ACTIVE_CONNECTION_PROFILE_ID, activeSettingsProfile)] = updated.first().id
+                }
+            }
+        }
+    }
+
+    suspend fun activeConnectionProfile(): ConnectionProfile? {
+        val prefs = dataStore.data.first()
+        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val profiles = ConnectionProfile.decodeList(
+            secureStore.decrypt(prefs[getProfileKey(CONNECTION_PROFILES_ENCRYPTED, profile)]).orEmpty()
+        )
+        val selectedId = prefs[getProfileKey(ACTIVE_CONNECTION_PROFILE_ID, profile)]
+        return profiles.firstOrNull { it.id == selectedId } ?: profiles.firstOrNull()
+    }
+
     suspend fun save(
         peer: String,
         vkHashes: String,
@@ -577,6 +638,18 @@ class SettingsStore(context: Context) {
             prefs[getProfileKey(EXCLUDED_APPS, profile)] = packages
             prefs[getProfileKey(IS_WHITELIST, profile)] = isWhitelist
             prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
+        }
+    }
+
+    private suspend fun migrateLegacyWdttLink() {
+        dataStore.edit { prefs ->
+            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val profilesKey = getProfileKey(CONNECTION_PROFILES_ENCRYPTED, profile)
+            if (!prefs[profilesKey].isNullOrBlank()) return@edit
+            val legacyLink = prefs[getProfileKey(WDTT_LINK, profile)] ?: return@edit
+            val imported = runCatching { ConnectionProfileParser.parse(legacyLink) }.getOrNull() ?: return@edit
+            prefs[profilesKey] = secureStore.encrypt(ConnectionProfile.encodeList(listOf(imported)))
+            prefs[getProfileKey(ACTIVE_CONNECTION_PROFILE_ID, profile)] = imported.id
         }
     }
 

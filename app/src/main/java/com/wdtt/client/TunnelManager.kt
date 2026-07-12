@@ -50,6 +50,7 @@ object TunnelManager {
     private var forceRegenerateUA = false 
     private var currentCaptchaMode = "wv" 
     private var currentCaptchaSolveMethod = "auto" 
+    private var staticWireGuardStarted = false
 
     @Volatile
     var isLoggingEnabled = true
@@ -85,6 +86,18 @@ object TunnelManager {
             }
             is TunnelEventParser.Event.Ready -> {
                 updateLog("ready", "[READY] Туннель готов к работе ✓", 2, false)
+                val staticConfig = currentParams?.wireGuardConfig.orEmpty()
+                if (!staticWireGuardStarted && staticConfig.isNotBlank()) {
+                    staticWireGuardStarted = true
+                    config.value = staticConfig
+                    scope.launch(Dispatchers.Main) {
+                        try {
+                            wgHelper?.startTunnel(staticConfig)
+                        } catch (e: Exception) {
+                            updateLog("vpn_start_error", "Ошибка запуска VPN: ${e.readableMessage()}", 99, true)
+                        }
+                    }
+                }
             }
             is TunnelEventParser.Event.Config -> {
                 val configStr = event.config.trim()
@@ -205,6 +218,7 @@ object TunnelManager {
                     forceRegenerateUA = false
                     currentCaptchaMode = params.captchaMode
                     currentCaptchaSolveMethod = params.captchaSolveMethod
+                    staticWireGuardStarted = false
                 }
                 
                 wgHelper = WireGuardHelper(appContext)
@@ -223,7 +237,7 @@ object TunnelManager {
                     running.value = false
                     return@launch
                 }
-                if (params.connectionPassword.isBlank()) {
+                if (!params.isFreeTurn && params.connectionPassword.isBlank()) {
                     updateLog("password_error", "Ошибка: пароль подключения не указан", 99, true)
                     running.value = false
                     return@launch
@@ -269,8 +283,18 @@ object TunnelManager {
                 cmd.add("-device-id")
                 cmd.add(androidId)
 
-                cmd.add("-password")
-                cmd.add(params.connectionPassword)
+                if (params.isFreeTurn) {
+                    cmd.add("-wrap-s")
+                    cmd.add("-obf-profile")
+                    cmd.add(params.obfProfile)
+                    cmd.add("-obf-key")
+                    cmd.add(params.obfKey)
+                    cmd.add("-free-client-id")
+                    cmd.add(params.freeClientId)
+                } else {
+                    cmd.add("-password")
+                    cmd.add(params.connectionPassword)
+                }
 
                 cmd.add("-captcha-mode")
                 cmd.add(params.captchaMode)
@@ -895,5 +919,10 @@ data class TunnelParams(
     val captchaSolveMethod: String = "auto",
     val fingerprint: String = "firefox",
     val clientIds: String = "8202606,6287487",
-    val obfsMode: String = "audio"
+    val obfsMode: String = "audio",
+    val isFreeTurn: Boolean = false,
+    val obfKey: String = "",
+    val obfProfile: String = "rtpopus3",
+    val freeClientId: String = "",
+    val wireGuardConfig: String = ""
 )

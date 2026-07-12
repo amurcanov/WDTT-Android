@@ -112,6 +112,12 @@ class MainActivity : ComponentActivity() {
         activeActivities--
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        importConnectionLink(intent.dataString)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
@@ -120,6 +126,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         checkAndRequestNotifications()
+        importConnectionLink(intent.dataString)
 
         setContent {
             val settingsStore = remember { SettingsStore(this) }
@@ -156,6 +163,21 @@ class MainActivity : ComponentActivity() {
                         scope.launch { settingsStore.saveActiveClientIds(ids) }
                     }
                 )
+            }
+        }
+    }
+
+    private fun importConnectionLink(rawLink: String?) {
+        val raw = rawLink?.trim().orEmpty()
+        if (raw.isEmpty()) return
+        val profile = runCatching { ConnectionProfileParser.parse(raw) }.getOrElse { error ->
+            Toast.makeText(this, error.message ?: "Не удалось импортировать ссылку", Toast.LENGTH_LONG).show()
+            return
+        }
+        TunnelManager.scope.launch {
+            SettingsStore(applicationContext).saveConnectionProfile(profile)
+            runOnUiThread {
+                Toast.makeText(this@MainActivity, "Конфиг ${profile.mode.label} импортирован", Toast.LENGTH_SHORT).show()
             }
         }
     }

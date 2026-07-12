@@ -144,7 +144,14 @@ func RunSession(
 	var relayWg sync.WaitGroup
 	relayWg.Add(2)
 
-	useWrap := len(tp.WrapKey) == wrapKeyLen
+	useWrap := len(tp.WrapKey) == wrapKeyLen && !tp.UseWrapS
+	var freeWrap freeWrapCodec
+	if tp.UseWrapS {
+		freeWrap, err = newFreeWrapCodec(tp.ObfProfile, tp.WrapKey)
+		if err != nil {
+			return false, fmt.Errorf("SRTP-WRAP-S init: %w", err)
+		}
+	}
 
 	var obfsCfg *ObfsConfig
 	var obfsWriteState *ObfsState
@@ -164,6 +171,9 @@ func RunSession(
 		defer sessCancel()
 
 		readBufLen := readBufSize + 80
+		if freeWrap != nil {
+			readBufLen = readBufSize + freeWrap.Overhead()
+		}
 		buf := make([]byte, readBufLen)
 		plain := make([]byte, readBufSize)
 		for {
@@ -183,6 +193,13 @@ func RunSession(
 					continue
 				}
 				payload = plain[:m]
+			} else if freeWrap != nil {
+				m, wrapErr := freeWrap.UnwrapPacket(payload, plain)
+				if wrapErr != nil {
+					log.Printf("[СЕССИЯ #%d] WRAP-S unwrap: %v (n=%d)", sessionID, wrapErr, n)
+					continue
+				}
+				payload = plain[:m]
 			}
 			if _, writeErr := pipeA.WriteTo(payload, peer); writeErr != nil {
 				return
@@ -194,6 +211,10 @@ func RunSession(
 		defer relayWg.Done()
 		defer sessCancel()
 		b := make([]byte, readBufSize)
+		var freeWire []byte
+		if freeWrap != nil {
+			freeWire = make([]byte, readBufSize+freeWrap.Overhead())
+		}
 		for {
 			n, _, readErr := pipeA.ReadFrom(b)
 			if readErr != nil {
@@ -209,6 +230,13 @@ func RunSession(
 					}
 					out = wrapped
 				}
+			} else if freeWrap != nil {
+				n, wrapErr := freeWrap.WrapInto(freeWire, out)
+				if wrapErr != nil {
+					log.Printf("[СЕССИЯ #%d] WRAP-S wrap: %v", sessionID, wrapErr)
+					return
+				}
+				out = freeWire[:n]
 			}
 			if _, writeErr := relay.WriteTo(out, peer); writeErr != nil {
 				return
@@ -249,7 +277,7 @@ func RunSession(
 	<-handshakeSem
 
 	if err != nil {
-		if useWrap {
+		if useWrap || freeWrap != nil {
 			errStr := strings.ToLower(err.Error())
 			if strings.Contains(errStr, "deadline") || strings.Contains(errStr, "timeout") {
 				return false, fmt.Errorf("WRAP_AUTH_TIMEOUT: DTLS timeout, пароль/WRAP не подтверждён")
@@ -258,6 +286,11 @@ func RunSession(
 		return false, fmt.Errorf("DTLS хендшейк: %w", err)
 	}
 	log.Printf("[ВОРКЕР #%d] [DTLS] Соединение установлено ✓", sessionID)
+	if freeWrap != nil {
+		if err := writeFreeTurnClientID(dtlsConn, tp.ClientID); err != nil {
+			return false, fmt.Errorf("SRTP-WRAP-S Client ID: %w", err)
+		}
+	}
 
 	stats.ActiveConnections.Add(1)
 	defer stats.ActiveConnections.Add(-1)

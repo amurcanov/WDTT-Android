@@ -21,7 +21,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Stop
@@ -45,6 +48,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wdtt.client.SettingsStore
+import com.wdtt.client.ConnectionProfile
+import com.wdtt.client.ConnectionProfileParser
 import com.wdtt.client.TunnelManager
 import com.wdtt.client.TunnelService
 import com.wdtt.client.WDTTColors
@@ -91,7 +96,10 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
 
     val activeProfile by settingsStore.activeProfile.collectAsStateWithLifecycle(initialValue = 0)
     val wdttLinkMode by settingsStore.wdttLinkMode.collectAsStateWithLifecycle(initialValue = false)
-    val wdttLink by settingsStore.wdttLink.collectAsStateWithLifecycle(initialValue = "")
+    val connectionProfiles by settingsStore.connectionProfiles.collectAsStateWithLifecycle(initialValue = emptyList())
+    val activeConnectionProfileId by settingsStore.activeConnectionProfileId.collectAsStateWithLifecycle(initialValue = "")
+    val selectedConnectionProfile = connectionProfiles.firstOrNull { it.id == activeConnectionProfileId }
+        ?: connectionProfiles.firstOrNull()
 
     val activeFingerprint by settingsStore.selectedFingerprint.collectAsStateWithLifecycle(initialValue = "firefox")
     val activeClientIds by settingsStore.activeClientIds.collectAsStateWithLifecycle(initialValue = "8202606,6287487")
@@ -125,17 +133,20 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
     var manualPortsEnabled by rememberSaveable { mutableStateOf(false) }
     var serverDtlsPortInput by rememberSaveable { mutableStateOf("56000") }
     var serverWgPortInput by rememberSaveable { mutableStateOf("56001") }
+    var showConnectionImport by rememberSaveable { mutableStateOf(false) }
+    var connectionImportText by rememberSaveable { mutableStateOf("") }
+    var connectionImportError by rememberSaveable { mutableStateOf("") }
+    var detailsProfile by remember { mutableStateOf<ConnectionProfile?>(null) }
+    var profileSwitching by remember { mutableStateOf(false) }
 
     val allHashes = remember(vkHash1, vkHash2, vkHash3, vkHash4) { listOf(vkHash1, vkHash2, vkHash3, vkHash4) }
     val uniqueHashes = remember(vkHash1, vkHash2, vkHash3, vkHash4) { allHashes.filter { it.isNotBlank() && it.length >= 16 }.distinct() }
-    val parsedLinkHashes = remember(wdttLink) {
-        if (wdttLink.trim().startsWith("wdtt://")) {
-            val clean = wdttLink.trim().removePrefix("wdtt://")
-            val parts = clean.split(":")
-            if (parts.size >= 6) {
-                parts[5].split(",").filter { stripVkUrlStatic(it).isNotBlank() }
-            } else emptyList()
-        } else emptyList()
+    val parsedLinkHashes = remember(selectedConnectionProfile) {
+        selectedConnectionProfile?.vkLinks
+            ?.split(Regex("[,\\s\\n]+"))
+            ?.map(::stripVkUrlStatic)
+            ?.filter { it.isNotBlank() }
+            .orEmpty()
     }
     val filledHashCount = remember(vkHash1, vkHash2, vkHash3, vkHash4, wdttLinkMode, parsedLinkHashes) { 
         if (wdttLinkMode) parsedLinkHashes.size else uniqueHashes.size 
@@ -268,14 +279,14 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
 
     val isPeerValid = peerInput.isNotBlank() && !peerInput.contains(":")
     val isHashesValid = combinedHashes.isNotBlank()
-    val isLinkValid = wdttLink.trim().startsWith("wdtt://") && wdttLink.trim().split(":").size >= 6 && wdttLink.trim().split(":")[5].isNotBlank()
+    val isLinkValid = selectedConnectionProfile?.isReady == true
     val isManualValid = isPeerValid && isHashesValid && savedConnectionPassword.isNotBlank() && !hasInputHashErrors
     val isValid = if (wdttLinkMode) isLinkValid else isManualValid
     val effectiveServerDtlsPort = if (manualPortsEnabled) serverDtlsPortInput.toIntOrNull()?.coerceIn(1, 65535) ?: 56000 else 56000
     val effectiveLocalPort = if (manualPortsEnabled) portInput.toIntOrNull()?.coerceIn(1, 65535) ?: 9000 else 9000
     var pendingStartAfterVpnPermission by remember { mutableStateOf(false) }
 
-    fun startTunnelService() {
+    fun startTunnelService(profileOverride: ConnectionProfile? = null) {
         val effectiveVkAuthMode = if (useVKCallsAuth) "vkcalls" else "legacy"
         val effectiveCaptchaMode = if (autoCaptchaEnabled) "auto" else if (useWVCaptcha) "wv" else "rjs"
         val effectiveCaptchaSolveMethod = if (!autoCaptchaEnabled && effectiveCaptchaMode == "wv" && isManualMode) "manual" else "auto"
@@ -290,33 +301,18 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
             settingsStore.saveCaptchaSolveMethod(effectiveCaptchaSolveMethod)
         }
 
-        var finalPeer = "$peerInput:$effectiveServerDtlsPort"
-        var finalHashes = combinedHashes
-        var finalLocalPort = effectiveLocalPort
-        var finalPassword = savedConnectionPassword
-
-        if (wdttLinkMode && wdttLink.trim().startsWith("wdtt://")) {
-            val clean = wdttLink.trim().removePrefix("wdtt://")
-            val parts = clean.split(":")
-            if (parts.size >= 5) {
-                val ip = parts[0]
-                val dtls = parts[1].toIntOrNull() ?: 56000
-                finalLocalPort = parts[3].toIntOrNull() ?: 9000
-                finalPassword = parts[4]
-                val hash = if (parts.size >= 6) parts[5] else ""
-                
-                finalPeer = "$ip:$dtls"
-                val rawHash = stripVkUrlStatic(hash)
-                finalHashes = if (rawHash.isNotBlank()) rawHash else normalizeHashes(hash)
-            }
-        }
+        val connectionProfile = profileOverride ?: if (wdttLinkMode) selectedConnectionProfile else null
+        val finalPeer = connectionProfile?.peer ?: "$peerInput:$effectiveServerDtlsPort"
+        val finalHashes = connectionProfile?.vkLinks ?: combinedHashes
+        val finalLocalPort = connectionProfile?.localPort ?: effectiveLocalPort
+        val finalPassword = connectionProfile?.wrapAPassword ?: savedConnectionPassword
 
         val intent = Intent(context, TunnelService::class.java).apply {
             action = "START"
             putExtra("peer", finalPeer)
             putExtra("vk_hashes", finalHashes)
             putExtra("secondary_vk_hash", "")
-            putExtra("workers_per_hash", workersInput.toInt())
+            putExtra("workers_per_hash", connectionProfile?.workers ?: workersInput.toInt())
             putExtra("port", finalLocalPort)
             putExtra("sni", sniInput)
             putExtra("connection_password", finalPassword)
@@ -326,6 +322,11 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
             putExtra("fingerprint", activeFingerprint)
             putExtra("client_ids", activeClientIds)
             putExtra("obfs_mode", obfsMode)
+            putExtra("free_turn", connectionProfile?.mode?.name == "WRAP_S")
+            putExtra("free_obf_key", connectionProfile?.obfKey.orEmpty())
+            putExtra("free_obf_profile", connectionProfile?.obfProfile.orEmpty())
+            putExtra("free_client_id", connectionProfile?.clientId.orEmpty())
+            putExtra("wireguard_config", connectionProfile?.wireGuardConfig.orEmpty())
         }
         if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
         else context.startService(intent)
@@ -392,6 +393,71 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
                 }
             },
             onDismiss = { showHashesDialog = false }
+        )
+    }
+
+    if (showConnectionImport) {
+        AlertDialog(
+            onDismissRequest = { showConnectionImport = false },
+            title = { Text("Импорт конфига") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = connectionImportText,
+                        onValueChange = { connectionImportText = it.trim() },
+                        label = { Text("Ссылка подключения") },
+                        supportingText = { Text("wdtt://, vkturnproxy:// или freeturn://") },
+                        minLines = 3,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (connectionImportError.isNotBlank()) {
+                        Text(connectionImportError, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val imported = runCatching { ConnectionProfileParser.parse(connectionImportText) }
+                    imported.onSuccess { profile ->
+                        scope.launch { settingsStore.saveConnectionProfile(profile) }
+                        connectionImportError = ""
+                        connectionImportText = ""
+                        showConnectionImport = false
+                    }.onFailure { error -> connectionImportError = error.message ?: "Не удалось импортировать ссылку" }
+                }) { Text("Импортировать") }
+            },
+            dismissButton = { TextButton(onClick = { showConnectionImport = false }) { Text("Отмена") } }
+        )
+    }
+
+    detailsProfile?.let { profile ->
+        AlertDialog(
+            onDismissRequest = { detailsProfile = null },
+            title = { Text(profile.name) },
+            text = {
+                Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Режим: ${profile.mode.label}")
+                    Text("Сервер: ${profile.peer}")
+                    Text("VK call link: ${profile.vkLinks}")
+                    Text("Локальный порт: ${profile.localPort}")
+                    Text("Потоков: ${profile.workers}")
+                    if (profile.mode.name == "WRAP_A") {
+                        Text("Пароль: ${profile.wrapAPassword}")
+                    } else {
+                        Text("OBF profile: ${profile.obfProfile}")
+                        Text("OBF key: ${profile.obfKey}")
+                        Text("Client ID: ${profile.clientId}")
+                        Text("WireGuard:\n${profile.wireGuardConfig.ifBlank { "Конфиг не указан" }}")
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { detailsProfile = null }) { Text("Готово") } },
+            dismissButton = {
+                TextButton(onClick = {
+                    scope.launch { settingsStore.removeConnectionProfile(profile.id) }
+                    detailsProfile = null
+                }) { Icon(Icons.Default.Delete, contentDescription = "Удалить конфиг") }
+            }
         )
     }
 
@@ -733,24 +799,57 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
                     }
 
                     if (wdttLinkMode) {
-                        Column {
-                            var linkText by remember(wdttLink) { mutableStateOf(wdttLink) }
-                            OutlinedTextField(
-                                value = linkText,
-                                onValueChange = {
-                                    val cleaned = it.filter { c -> !c.isWhitespace() }
-                                    linkText = cleaned
-                                    scope.launch { settingsStore.saveWdttLink(cleaned) }
-                                },
-                                label = { Text("Ссылка wdtt://") },
-                                placeholder = { Text("Ссылка wdtt://") },
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(16.dp),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                                )
-                            )
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("Конфиги", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                                IconButton(onClick = { showConnectionImport = true }, enabled = !tunnelRunning) {
+                                    Icon(Icons.Default.Add, contentDescription = "Добавить конфиг")
+                                }
+                            }
+                            if (connectionProfiles.isEmpty()) {
+                                Text("Добавьте ссылку wdtt://, vkturnproxy:// или freeturn://", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            connectionProfiles.forEach { profile ->
+                                val selected = profile.id == selectedConnectionProfile?.id
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                                    onClick = {
+                                        if (profile.id != selectedConnectionProfile?.id && !profileSwitching) {
+                                            scope.launch {
+                                                profileSwitching = true
+                                                try {
+                                                    settingsStore.selectConnectionProfile(profile.id)
+                                                    if (tunnelRunning && profile.isReady) {
+                                                        TunnelManager.stopAndWait()
+                                                        startTunnelService(profile)
+                                                    }
+                                                } finally {
+                                                    profileSwitching = false
+                                                }
+                                            }
+                                        }
+                                    }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(profile.name, maxLines = 1, fontWeight = FontWeight.Medium)
+                                            Text(
+                                                "${profile.mode.label}${if (profile.mode.name == "WRAP_S") " · ${profile.obfProfile}" else ""}",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        IconButton(onClick = { detailsProfile = profile }) {
+                                            Icon(Icons.Default.Info, contentDescription = "Параметры конфига")
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
