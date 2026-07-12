@@ -279,6 +279,9 @@ type TurnParams struct {
 	Hashes   []string
 	WrapKey  []byte
 	ObfsMode string
+	UseWrapS bool
+	ObfProfile string
+	ClientID string
 }
 
 type Credentials struct {

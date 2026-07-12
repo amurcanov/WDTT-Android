@@ -93,14 +93,16 @@ class QuickToggleTileService : TileService() {
     private suspend fun buildStartIntent(): Intent? {
         return runCatching {
             val store = SettingsStore(applicationContext)
-            val basePeer = store.peer.first()
-            val hashes = store.vkHashes.first()
-            val password = store.connectionPassword.first()
-            if (basePeer.isBlank() || hashes.isBlank() || password.isBlank()) return null
+            val profile = store.activeConnectionProfile()
+            val basePeer = profile?.peer ?: store.peer.first()
+            val hashes = profile?.vkLinks ?: store.vkHashes.first()
+            val password = profile?.wrapAPassword ?: store.connectionPassword.first()
+            val isFreeTurn = profile?.mode == ConnectionMode.WRAP_S
+            if (basePeer.isBlank() || hashes.isBlank() || (!isFreeTurn && password.isBlank()) || (isFreeTurn && profile?.isReady != true)) return null
 
             val manualPortsEnabled = store.manualPortsEnabled.first()
             val serverDtlsPort = if (manualPortsEnabled) store.serverDtlsPort.first() else 56000
-            val localPort = if (manualPortsEnabled) store.listenPort.first() else 9000
+            val localPort = profile?.localPort ?: if (manualPortsEnabled) store.listenPort.first() else 9000
             val peerWithPort = if (basePeer.contains(":")) basePeer else "$basePeer:$serverDtlsPort"
 
             Intent(this, TunnelService::class.java).apply {
@@ -108,7 +110,7 @@ class QuickToggleTileService : TileService() {
                 putExtra("peer", peerWithPort)
                 putExtra("vk_hashes", hashes)
                 putExtra("secondary_vk_hash", store.secondaryVkHash.first())
-                putExtra("workers_per_hash", store.workersPerHash.first())
+                putExtra("workers_per_hash", profile?.workers ?: store.workersPerHash.first())
                 putExtra("port", localPort)
                 putExtra("sni", store.sni.first())
                 putExtra("connection_password", store.connectionPassword.first())
@@ -119,6 +121,11 @@ class QuickToggleTileService : TileService() {
                 putExtra("fingerprint", store.selectedFingerprint.first())
                 putExtra("client_ids", store.activeClientIds.first())
                 putExtra("obfs_mode", store.obfsMode.first())
+                putExtra("free_turn", isFreeTurn)
+                putExtra("free_obf_key", profile?.obfKey.orEmpty())
+                putExtra("free_obf_profile", profile?.obfProfile.orEmpty())
+                putExtra("free_client_id", profile?.clientId.orEmpty())
+                putExtra("wireguard_config", profile?.wireGuardConfig.orEmpty())
             }
         }.getOrNull()
     }

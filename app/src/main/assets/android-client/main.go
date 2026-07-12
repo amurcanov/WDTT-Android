@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -155,6 +156,10 @@ func main() {
 	fingerprint := flag.String("fingerprint", "chrome", "браузерный фингерпринт (chrome, safari, ios, android, firefox)")
 	clientIdsFlag := flag.String("client-ids", "", "ID клиентов VK через запятую")
 	obfsMode := flag.String("obfs", "audio", "режим обфускации (audio/video)")
+	useWrapS := flag.Bool("wrap-s", false, "SRTP-WRAP-S для free-turn-proxy")
+	freeObfProfile := flag.String("obf-profile", freeProfileOpus3, "free-turn OBF profile")
+	freeObfKey := flag.String("obf-key", "", "free-turn OBF key (64 hex chars)")
+	freeClientID := flag.String("free-client-id", "", "free-turn Client ID")
 
 	flag.Parse()
 	activeVKAuthMode := setVKAuthMode(*vkAuthMode)
@@ -190,13 +195,26 @@ func main() {
 		log.Fatal("[КЛИЕНТ] Нет хешей VK")
 	}
 
-	if *connPassword == "" {
-		log.Fatal("[КЛИЕНТ] Нужен -password: WRAP ключ теперь выводится из пароля подключения")
-	}
-
-	wrapKey, err := deriveWrapKey(*connPassword)
-	if err != nil {
-		log.Fatalf("[КЛИЕНТ] WRAP key derive: %v", err)
+	var wrapKey []byte
+	if *useWrapS {
+		if *freeClientID == "" {
+			log.Fatal("[КЛИЕНТ] Для SRTP-WRAP-S нужен -free-client-id")
+		}
+		if *freeObfProfile != freeProfileOpus && *freeObfProfile != freeProfileOpus2 && *freeObfProfile != freeProfileOpus3 {
+			log.Fatalf("[КЛИЕНТ] Неизвестный OBF profile: %s", *freeObfProfile)
+		}
+		wrapKey, err = hex.DecodeString(strings.TrimSpace(*freeObfKey))
+		if err != nil || len(wrapKey) != wrapKeyLen {
+			log.Fatal("[КЛИЕНТ] Для SRTP-WRAP-S нужен -obf-key из 64 hex символов")
+		}
+	} else {
+		if *connPassword == "" {
+			log.Fatal("[КЛИЕНТ] Нужен -password: WRAP ключ теперь выводится из пароля подключения")
+		}
+		wrapKey, err = deriveWrapKey(*connPassword)
+		if err != nil {
+			log.Fatalf("[КЛИЕНТ] WRAP key derive: %v", err)
+		}
 	}
 
 	maxWorkers := 108
@@ -214,6 +232,9 @@ func main() {
 		Hashes:   hashes,
 		WrapKey:  wrapKey,
 		ObfsMode: *obfsMode,
+		UseWrapS: *useWrapS,
+		ObfProfile: *freeObfProfile,
+		ClientID: *freeClientID,
 	}
 
 	var localConn net.PacketConn
@@ -250,7 +271,9 @@ func main() {
 	numGroups := *numW / workersPerGroup
 
 	wrapStatus := "OFF"
-	if len(wrapKey) == wrapKeyLen {
+	if *useWrapS {
+		wrapStatus = fmt.Sprintf("SRTP-WRAP-S (%s, Client ID %s)", *freeObfProfile, *freeClientID)
+	} else if len(wrapKey) == wrapKeyLen {
 		wrapStatus = "ON (password HKDF + RTP AEAD)"
 	}
 
@@ -271,7 +294,11 @@ func main() {
 	log.Printf("[КЛИЕНТ] Слушаю: %s | Пир: %s", *listen, cleanPeerAddr)
 	log.Printf("[КЛИЕНТ] Протокол: UDP")
 	log.Printf("[КЛИЕНТ] WRAP: %s", wrapStatus)
-	log.Printf("[WRAP] Ключ выведен из пароля, режим RTP AEAD активен")
+	if *useWrapS {
+		log.Printf("[WRAP-S] Free Turn profile=%s, Client ID активен", *freeObfProfile)
+	} else {
+		log.Printf("[WRAP] Ключ выведен из пароля, режим RTP AEAD активен")
+	}
 	log.Printf("[КЛИЕНТ] Device ID: %s", *deviceID)
 	log.Printf("[КЛИЕНТ] Captcha: %s", captchaStatus)
 	log.Println("[КЛИЕНТ] ═══════════════════════════════════════")
@@ -368,7 +395,7 @@ func main() {
 		go func(groupID int, isFirstGroup bool, configChan chan<- string, workerIds []int, startHashIndex int, waitC, waitS <-chan struct{}, sigC, sigS chan<- struct{}) {
 			defer wg.Done()
 			WorkerGroup(ctx, groupID, startHashIndex, tp, peer, disp, localPort,
-				isFirstGroup, configChan, workerIds, &pauseFlag, *deviceID, *connPassword, stats, waitC, sigC, waitS, sigS)
+				isFirstGroup && !*useWrapS, configChan, workerIds, &pauseFlag, *deviceID, *connPassword, stats, waitC, sigC, waitS, sigS)
 		}(gID, isFirst, cc, ids, g, myWaitCreds, myWaitSpawn, mySignalCreds, mySignalSpawn)
 	}
 

@@ -75,7 +75,12 @@ class TunnelService : Service() {
                     captchaSolveMethod = intent.getStringExtra("captcha_solve_method") ?: "auto",
                     fingerprint = intent.getStringExtra("fingerprint") ?: "firefox",
                     clientIds = intent.getStringExtra("client_ids") ?: "8202606,6287487",
-                    obfsMode = intent.getStringExtra("obfs_mode")?.takeIf { it.isNotBlank() } ?: "audio"
+                    obfsMode = intent.getStringExtra("obfs_mode")?.takeIf { it.isNotBlank() } ?: "audio",
+                    isFreeTurn = intent.getBooleanExtra("free_turn", false),
+                    obfKey = intent.getStringExtra("free_obf_key") ?: "",
+                    obfProfile = intent.getStringExtra("free_obf_profile") ?: "rtpopus3",
+                    freeClientId = intent.getStringExtra("free_client_id") ?: "",
+                    wireGuardConfig = intent.getStringExtra("wireguard_config") ?: ""
                 )
                 startTunnel(params)
             }
@@ -109,25 +114,31 @@ class TunnelService : Service() {
         TunnelManager.scope.launch {
             try {
                 val store = SettingsStore(appContext)
-                val basePeer = store.peer.first()
+                val profile = store.activeConnectionProfile()
+                val basePeer = profile?.peer ?: store.peer.first()
                 val manualPortsEnabled = store.manualPortsEnabled.first()
                 val serverDtlsPort = if (manualPortsEnabled) store.serverDtlsPort.first() else 56000
                 val peerWithPort = if (basePeer.isBlank() || basePeer.contains(":")) basePeer else "$basePeer:$serverDtlsPort"
                 val params = TunnelParams(
                     peer = peerWithPort,
-                    vkHashes = store.vkHashes.first(),
+                    vkHashes = profile?.vkLinks ?: store.vkHashes.first(),
                     secondaryVkHash = store.secondaryVkHash.first(),
-                    workersPerHash = store.workersPerHash.first(),
-                    port = store.listenPort.first(),
+                    workersPerHash = profile?.workers ?: store.workersPerHash.first(),
+                    port = profile?.localPort ?: store.listenPort.first(),
                     sni = store.sni.first(),
-                    connectionPassword = store.connectionPassword.first(),
+                    connectionPassword = profile?.wrapAPassword ?: store.connectionPassword.first(),
                     vkAuthMode = sanitizeVkAuthMode(store.vkAuthMode.first()),
                     captchaMode = sanitizeCaptchaMode(store.captchaMode.first()),
                     captchaSolveMethod = store.captchaSolveMethod.first(),
                     fingerprint = store.selectedFingerprint.first(),
-                    clientIds = store.activeClientIds.first()
+                    clientIds = store.activeClientIds.first(),
+                    isFreeTurn = profile?.mode == ConnectionMode.WRAP_S,
+                    obfKey = profile?.obfKey.orEmpty(),
+                    obfProfile = profile?.obfProfile ?: "rtpopus3",
+                    freeClientId = profile?.clientId.orEmpty(),
+                    wireGuardConfig = profile?.wireGuardConfig.orEmpty()
                 )
-                if (params.peer.isNotEmpty() && params.vkHashes.isNotEmpty()) {
+                if (params.peer.isNotEmpty() && params.vkHashes.isNotEmpty() && (!params.isFreeTurn || profile?.isReady == true)) {
                     launch(Dispatchers.Main) {
                         startTunnel(params)
                     }
