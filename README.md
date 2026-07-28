@@ -78,7 +78,7 @@
 Улучшенные форки WDTT на андроид:
 - [Ivan4537/WDTT-Plus](https://github.com/Ivan4537/WDTT-Plus)
 - [XXcipherX/proxy-turn-vk-android](https://github.com/XXcipherX/proxy-turn-vk-android)
-- [SpaceNeuroX/proxy-turn-vk-android](https://github.com/SpaceNeuroX/proxy-turn-vk-android)
+-
 
 **Альтеративный форк под Windows**
 - [IGOR7276/proxy-turn-vk-windows](https://github.com/IGOR7276/proxy-turn-vk-windows)
