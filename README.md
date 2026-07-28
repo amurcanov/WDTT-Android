@@ -13,9 +13,6 @@
 
 <div align="center">
   
-[WDTT Community TG](https://t.me/wdttcommunity)
-</div>
-
 **WDTT** — это Android-приложение для создания защищённого **WireGuard-туннеля поверх TURN/DTLS**. Клиент поднимает локальный VPN-интерфейс на устройстве, получает WireGuard-конфигурацию от вашего VPS и передаёт транспорт через TURN-серверы VK, маскируя соединение под обычный зашифрованный медиатрафик звонка.
 
 <img width="1000" height="738" alt="MyCollages (1)" src="https://github.com/user-attachments/assets/549c6624-978c-4b00-aae2-d195e470a1d1" />
