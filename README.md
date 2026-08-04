@@ -15,6 +15,8 @@
   <img src="https://img.shields.io/github/stars/amurcanov/proxy-turn-vk-android?style=for-the-badge&logo=github&color=ffca28&labelColor=24292e" alt="Stars">
 </a>
 
+[WDTT Telegram Community](https://t.me/wdttcommunity)
+
 </div>
 
 <br>
