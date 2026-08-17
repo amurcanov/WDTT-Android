@@ -5,6 +5,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -13,10 +15,17 @@ import java.util.Locale
 object DeployManager {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    val isDeploying = MutableStateFlow(false)
-    val deployProgress = MutableStateFlow(0f)
-    val currentStep = MutableStateFlow("")
-    val lastResult = MutableStateFlow("") 
+    private val _isDeploying = MutableStateFlow(false)
+    val isDeploying: StateFlow<Boolean> = _isDeploying.asStateFlow()
+    
+    private val _deployProgress = MutableStateFlow(0f)
+    val deployProgress: StateFlow<Float> = _deployProgress.asStateFlow()
+    
+    private val _currentStep = MutableStateFlow("")
+    val currentStep: StateFlow<String> = _currentStep.asStateFlow()
+    
+    private val _lastResult = MutableStateFlow("")
+    val lastResult: StateFlow<String> = _lastResult.asStateFlow()
 
     @Volatile
     var activeSession: com.jcraft.jsch.Session? = null
@@ -49,22 +58,22 @@ object DeployManager {
 
     fun startDeploy() {
         
-        if (isDeploying.value && deployStartTime > 0 &&
+        if (_isDeploying.value && deployStartTime > 0 &&
             System.currentTimeMillis() - deployStartTime > 30 * 60 * 1000) {
             writeError("Автосброс: предыдущий деплой завис >30 мин")
             forceReset()
         }
-        isDeploying.value = true
+        _isDeploying.value = true
         deployStartTime = System.currentTimeMillis()
-        deployProgress.value = 0f
-        currentStep.value = "Инициализация..."
-        lastResult.value = ""
+        _deployProgress.value = 0f
+        _currentStep.value = "Инициализация..."
+        _lastResult.value = ""
     }
 
     fun stopDeploy(result: String = "") {
-        isDeploying.value = false
+        _isDeploying.value = false
         deployStartTime = 0L
-        if (result.isNotBlank()) lastResult.value = result
+        if (result.isNotBlank()) _lastResult.value = result
         val session = activeSession
         activeSession = null
         try { session?.disconnect() } catch (_: Exception) {}
@@ -75,14 +84,14 @@ object DeployManager {
         val session = activeSession
         activeSession = null
         try { session?.disconnect() } catch (_: Exception) {}
-        isDeploying.value = false
+        _isDeploying.value = false
         deployStartTime = 0L
-        deployProgress.value = 0f
-        currentStep.value = ""
+        _deployProgress.value = 0f
+        _currentStep.value = ""
     }
 
     fun updateProgress(progress: Float, step: String) {
-        deployProgress.value = progress
-        currentStep.value = step
+        _deployProgress.value = progress
+        _currentStep.value = step
     }
 }

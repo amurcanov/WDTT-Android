@@ -13,15 +13,20 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Stop
@@ -29,6 +34,7 @@ import androidx.compose.material.icons.filled.Tag
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -36,6 +42,8 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.Density
@@ -114,7 +122,7 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
     var vkHash2 by rememberSaveable { mutableStateOf("") }
     var vkHash3 by rememberSaveable { mutableStateOf("") }
     var vkHash4 by rememberSaveable { mutableStateOf("") }
-    var workersInput by rememberSaveable { mutableFloatStateOf(18f) }
+    var workersInput by rememberSaveable { mutableFloatStateOf(16f) }
     var showHashesDialog by rememberSaveable { mutableStateOf(false) }
     var useVKCallsAuth by rememberSaveable { mutableStateOf(true) }
     var obfsMode by rememberSaveable { mutableStateOf("audio") }
@@ -125,6 +133,15 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
     var manualPortsEnabled by rememberSaveable { mutableStateOf(false) }
     var serverDtlsPortInput by rememberSaveable { mutableStateOf("56000") }
     var serverWgPortInput by rememberSaveable { mutableStateOf("56001") }
+
+    // Состояния для конфигов - храним как список строк (ссылок)
+    var configLinks by rememberSaveable { mutableStateOf<List<String>>(emptyList()) }
+    var selectedConfigLink by rememberSaveable { mutableStateOf<String?>(null) }
+    var showAddConfigDialog by rememberSaveable { mutableStateOf(false) }
+    var showManualInputDialog by rememberSaveable { mutableStateOf(false) }
+
+    // Конвертируем ссылки в объекты Config для отображения
+    val configs = configLinks.mapNotNull { Config.fromLink(it) }
 
     val allHashes = remember(vkHash1, vkHash2, vkHash3, vkHash4) { listOf(vkHash1, vkHash2, vkHash3, vkHash4) }
     val uniqueHashes = remember(vkHash1, vkHash2, vkHash3, vkHash4) { allHashes.filter { it.isNotBlank() && it.length >= 16 }.distinct() }
@@ -145,13 +162,31 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
     var portInput by rememberSaveable { mutableStateOf("9000") }
     var sniInput by rememberSaveable { mutableStateOf("") }
 
+    // Загрузка конфигов из ссылки
+    LaunchedEffect(wdttLink, wdttLinkMode) {
+        if (wdttLinkMode && wdttLink.isNotBlank()) {
+            try {
+                val config = Config.fromLink(wdttLink)
+                if (config != null) {
+                    configLinks = listOf(wdttLink)
+                    if (selectedConfigLink == null) {
+                        selectedConfigLink = wdttLink
+                    }
+                }
+            } catch (_: Exception) {
+                // Ошибка парсинга
+            }
+        } else if (!wdttLinkMode) {
+            configLinks = emptyList()
+            selectedConfigLink = null
+        }
+    }
+
     LaunchedEffect(dynamicMaxWorkers) {
         if (workersInput > dynamicMaxWorkers) {
             workersInput = dynamicMaxWorkers
         }
     }
-
-    val currentWorkers = workersInput.coerceIn(WORKERS_PER_GROUP.toFloat(), dynamicMaxWorkers)
 
     val hashErrors = remember(vkHash1, vkHash2, vkHash3, vkHash4) {
         buildList {
@@ -199,7 +234,7 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
         
         peerInput = peer
         parseHashes(hashes)
-        workersInput = roundToGroup(workers.toFloat(), (listOf(vkHash1, vkHash2, vkHash3, vkHash4).count { it.isNotBlank() }.coerceAtLeast(1) * 27).toFloat())
+        workersInput = workers.toFloat().coerceIn(WORKERS_PER_GROUP.toFloat(), dynamicMaxWorkers)
         portInput = port.toString()
         manualPortsEnabled = manualPorts
         serverDtlsPortInput = serverDtlsPort.toString()
@@ -265,12 +300,17 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
     }
 
     val scrollState = rememberScrollState()
+    val clipboardManager = LocalClipboardManager.current
 
     val isPeerValid = peerInput.isNotBlank() && !peerInput.contains(":")
     val isHashesValid = combinedHashes.isNotBlank()
     val isLinkValid = wdttLink.trim().startsWith("wdtt://") && wdttLink.trim().split(":").size >= 6 && wdttLink.trim().split(":")[5].isNotBlank()
     val isManualValid = isPeerValid && isHashesValid && savedConnectionPassword.isNotBlank() && !hasInputHashErrors
-    val isValid = if (wdttLinkMode) isLinkValid else isManualValid
+    val isValid = if (wdttLinkMode) {
+        configs.isNotEmpty() && selectedConfigLink != null
+    } else {
+        isManualValid
+    }
     val effectiveServerDtlsPort = if (manualPortsEnabled) serverDtlsPortInput.toIntOrNull()?.coerceIn(1, 65535) ?: 56000 else 56000
     val effectiveLocalPort = if (manualPortsEnabled) portInput.toIntOrNull()?.coerceIn(1, 65535) ?: 9000 else 9000
     var pendingStartAfterVpnPermission by remember { mutableStateOf(false) }
@@ -279,35 +319,45 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
         val effectiveVkAuthMode = if (useVKCallsAuth) "vkcalls" else "legacy"
         val effectiveCaptchaMode = if (autoCaptchaEnabled) "auto" else if (useWVCaptcha) "wv" else "rjs"
         val effectiveCaptchaSolveMethod = if (!autoCaptchaEnabled && effectiveCaptchaMode == "wv" && isManualMode) "manual" else "auto"
+        
+        var finalPeer = peerInput
+        var finalHashes = combinedHashes
+        var finalLocalPort = effectiveLocalPort
+        var finalPassword = savedConnectionPassword
+        var finalLink = ""
+
+        if (wdttLinkMode && selectedConfigLink != null) {
+            val selectedConfig = Config.fromLink(selectedConfigLink!!)
+            if (selectedConfig != null) {
+                finalLink = selectedConfig.toLink()
+                // Парсим ссылку
+                val clean = finalLink.removePrefix("wdtt://")
+                val parts = clean.split(":")
+                if (parts.size >= 5) {
+                    val ip = parts[0]
+                    val dtls = parts[1].toIntOrNull() ?: 56000
+                    finalLocalPort = parts[3].toIntOrNull() ?: 9000
+                    finalPassword = parts[4]
+                    val hash = if (parts.size >= 6) parts[5] else ""
+                    
+                    finalPeer = "$ip:$dtls"
+                    val rawHash = stripVkUrlStatic(hash)
+                    finalHashes = if (rawHash.isNotBlank()) rawHash else normalizeHashes(hash)
+                }
+            }
+        }
+
         saveJob?.cancel()
         scope.launch {
             settingsStore.save(
                 peerInput, combinedHashes, "",
-                workersInput.toInt(), "udp", effectiveLocalPort, sniInput, false
+                workersInput.toInt(), "udp", finalLocalPort, sniInput, false
             )
             settingsStore.saveVkAuthMode(effectiveVkAuthMode)
             settingsStore.saveCaptchaMode(effectiveCaptchaMode)
             settingsStore.saveCaptchaSolveMethod(effectiveCaptchaSolveMethod)
-        }
-
-        var finalPeer = "$peerInput:$effectiveServerDtlsPort"
-        var finalHashes = combinedHashes
-        var finalLocalPort = effectiveLocalPort
-        var finalPassword = savedConnectionPassword
-
-        if (wdttLinkMode && wdttLink.trim().startsWith("wdtt://")) {
-            val clean = wdttLink.trim().removePrefix("wdtt://")
-            val parts = clean.split(":")
-            if (parts.size >= 5) {
-                val ip = parts[0]
-                val dtls = parts[1].toIntOrNull() ?: 56000
-                finalLocalPort = parts[3].toIntOrNull() ?: 9000
-                finalPassword = parts[4]
-                val hash = if (parts.size >= 6) parts[5] else ""
-                
-                finalPeer = "$ip:$dtls"
-                val rawHash = stripVkUrlStatic(hash)
-                finalHashes = if (rawHash.isNotBlank()) rawHash else normalizeHashes(hash)
+            if (wdttLinkMode && finalLink.isNotBlank()) {
+                settingsStore.saveWdttLink(finalLink)
             }
         }
 
@@ -395,6 +445,73 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
         )
     }
 
+    // Диалог добавления конфига
+    if (showAddConfigDialog) {
+        AddConfigDialog(
+            onDismiss = { showAddConfigDialog = false },
+            onAddManual = {
+                showAddConfigDialog = false
+                showManualInputDialog = true
+            },
+            onAddFromClipboard = {
+                showAddConfigDialog = false
+                val clipboardText = clipboardManager.getText()?.text ?: ""
+                if (clipboardText.isNotBlank()) {
+                    try {
+                        val config = Config.fromLink(clipboardText)
+                        if (config != null) {
+                            configLinks = configLinks + clipboardText
+                            if (selectedConfigLink == null) {
+                                selectedConfigLink = clipboardText
+                            }
+                            scope.launch {
+                                settingsStore.saveWdttLink(clipboardText)
+                            }
+                            Toast.makeText(context, "Конфиг добавлен", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "Неверный формат конфига", Toast.LENGTH_SHORT).show()
+                        }
+                    } catch (_: Exception) {
+                        Toast.makeText(context, "Ошибка импорта", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    Toast.makeText(context, "Буфер обмена пуст", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
+    }
+
+    // Диалог ручного ввода
+    if (showManualInputDialog) {
+        ManualInputDialog(
+            onDismiss = { showManualInputDialog = false },
+            onAdd = { link ->
+                if (link.isNotBlank()) {
+                    try {
+                        val config = Config.fromLink(link)
+                        if (config != null) {
+                            configLinks = configLinks + link
+                            if (selectedConfigLink == null) {
+                                selectedConfigLink = link
+                            }
+                            scope.launch {
+                                settingsStore.saveWdttLink(link)
+                            }
+                            Toast.makeText(context, "Конфиг добавлен", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "Неверный формат ссылки", Toast.LENGTH_SHORT).show()
+                        }
+                    } catch (_: Exception) {
+                        Toast.makeText(context, "Ошибка добавления конфига", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    Toast.makeText(context, "Введите ссылку", Toast.LENGTH_SHORT).show()
+                }
+                showManualInputDialog = false
+            }
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -404,6 +521,7 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (!wdttLinkMode) {
+                // Режим ручного ввода
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     
                     Text(
@@ -467,294 +585,392 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
             }
 
             
-                AppSectionCard(
-                    contentPadding = PaddingValues(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(0.dp)
+            AppSectionCard(
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(0.dp)
+            ) {
+                
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            "Мощность",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = "${currentWorkers.toInt()}",
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    }
+                    Text(
+                        "Мощность",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "${workersInput.toInt()}",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
 
-                    Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(8.dp))
 
-                    val maxWorkers = dynamicMaxWorkers
-                    val minWorkers = WORKERS_PER_GROUP.toFloat()
-                    val currentWorkersVal = roundToGroup(currentWorkers.coerceIn(minWorkers, maxWorkers), maxWorkers)
+                val maxWorkers = dynamicMaxWorkers
+                val minWorkers = WORKERS_PER_GROUP.toFloat()
+                
+                var inputText by remember { mutableStateOf(workersInput.toInt().toString()) }
+                
+                LaunchedEffect(workersInput) {
+                    inputText = workersInput.toInt().toString()
+                }
 
-                    CompactSteppedSlider(
-                        value = currentWorkersVal,
-                        onValueChange = { raw ->
-                            workersInput = roundToGroup(raw, maxWorkers)
-                            scheduleSave()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = inputText,
+                        onValueChange = { 
+                            if (it.isEmpty() || it.all { char -> char.isDigit() }) {
+                                inputText = it
+                            }
                         },
-                        valueRange = minWorkers..maxWorkers,
-                        stepSize = WORKERS_PER_GROUP.toFloat(),
+                        label = { Text("Количество воркеров") },
+                        placeholder = { Text("Введите число") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(16.dp),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         enabled = !tunnelRunning,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    
-                    HorizontalDivider(
-                        modifier = Modifier.padding(vertical = 4.dp),
-                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                    )
-
-                    
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            "Режим",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.weight(1f)
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
                         )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            ProtocolChip("Вызов", useVKCallsAuth, enabled = !tunnelRunning) {
-                                useVKCallsAuth = true
-                                scope.launch { settingsStore.saveVkAuthMode("vkcalls") }
+                    )
+                    
+                    Button(
+                        onClick = {
+                            val newValue = inputText.toIntOrNull()
+                            if (newValue != null) {
+                                val clampedValue = newValue.toFloat().coerceIn(minWorkers, maxWorkers)
+                                workersInput = clampedValue
+                                inputText = clampedValue.toInt().toString()
+                                scheduleSave()
                             }
-                            ProtocolChip("Капча", !useVKCallsAuth, enabled = !tunnelRunning) {
-                                useVKCallsAuth = false
-                                scope.launch { settingsStore.saveVkAuthMode("legacy") }
-                            }
+                        },
+                        modifier = Modifier.height(56.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        enabled = !tunnelRunning && inputText.isNotEmpty() && inputText.toIntOrNull() != null
+                    ) {
+                        Text("OK", fontWeight = FontWeight.Bold)
+                    }
+                }
+                
+                Text(
+                    text = "Диапазон: от ${minWorkers.toInt()} до ${maxWorkers.toInt()}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+
+                
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 4.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                )
+
+                
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        "Режим",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ProtocolChip("Вызов", useVKCallsAuth, enabled = !tunnelRunning) {
+                            useVKCallsAuth = true
+                            scope.launch { settingsStore.saveVkAuthMode("vkcalls") }
+                        }
+                        ProtocolChip("Капча", !useVKCallsAuth, enabled = !tunnelRunning) {
+                            useVKCallsAuth = false
+                            scope.launch { settingsStore.saveVkAuthMode("legacy") }
                         }
                     }
+                }
 
-                    
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            "Маскировка",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            ProtocolChip("Аудио", obfsMode == "audio", enabled = !tunnelRunning) {
-                                obfsMode = "audio"
-                                scope.launch { settingsStore.saveObfsMode("audio") }
-                            }
-                            ProtocolChip("Видео", obfsMode == "video", enabled = !tunnelRunning) {
-                                obfsMode = "video"
-                                scope.launch { settingsStore.saveObfsMode("video") }
-                            }
+                
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        "Маскировка",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ProtocolChip("Аудио", obfsMode == "audio", enabled = !tunnelRunning) {
+                            obfsMode = "audio"
+                            scope.launch { settingsStore.saveObfsMode("audio") }
+                        }
+                        ProtocolChip("Видео", obfsMode == "video", enabled = !tunnelRunning) {
+                            obfsMode = "video"
+                            scope.launch { settingsStore.saveObfsMode("video") }
                         }
                     }
+                }
 
-                    AnimatedVisibility(
-                        visible = !useVKCallsAuth,
-                        enter = fadeIn() + expandVertically(),
-                        exit = fadeOut() + shrinkVertically()
-                    ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
-                            HorizontalDivider(
-                                modifier = Modifier.padding(vertical = 4.dp),
-                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                AnimatedVisibility(
+                    visible = !useVKCallsAuth,
+                    enter = fadeIn() + expandVertically(),
+                    exit = fadeOut() + shrinkVertically()
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
+                        HorizontalDivider(
+                            modifier = Modifier.padding(vertical = 4.dp),
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                        )
+
+                        
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                if (autoCaptchaEnabled) "Авто капча" else "Ручная капча",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.weight(1f)
                             )
+                            Switch(
+                                checked = autoCaptchaEnabled,
+                                enabled = !tunnelRunning,
+                                onCheckedChange = { enabled ->
+                                    autoCaptchaEnabled = enabled
+                                    scope.launch {
+                                        if (enabled) {
+                                            settingsStore.saveCaptchaMode("auto")
+                                            settingsStore.saveCaptchaSolveMethod("auto")
+                                        } else {
+                                            val mode = if (useWVCaptcha) "wv" else "rjs"
+                                            settingsStore.saveCaptchaMode(mode)
+                                            settingsStore.saveCaptchaSolveMethod(if (mode == "wv" && isManualMode) "manual" else "auto")
+                                        }
+                                    }
+                                }
+                            )
+                        }
 
-                            
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(
-                                    if (autoCaptchaEnabled) "Авто капча" else "Ручная капча",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Medium,
-                                    modifier = Modifier.weight(1f)
+                        AnimatedVisibility(
+                            visible = !autoCaptchaEnabled,
+                            enter = fadeIn() + expandVertically(),
+                            exit = fadeOut() + shrinkVertically()
+                        ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
+                                
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(vertical = 4.dp),
+                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
                                 )
-                                Switch(
-                                    checked = autoCaptchaEnabled,
-                                    enabled = !tunnelRunning,
-                                    onCheckedChange = { enabled ->
-                                        autoCaptchaEnabled = enabled
-                                        scope.launch {
-                                            if (enabled) {
-                                                settingsStore.saveCaptchaMode("auto")
+
+                                
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        "Метод обхода капчи",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Medium,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        ProtocolChip("WBV", useWVCaptcha, enabled = !tunnelRunning) {
+                                            useWVCaptcha = true
+                                            isManualMode = wbvManualMode
+                                            scope.launch {
+                                                settingsStore.saveCaptchaMode("wv")
+                                                settingsStore.saveCaptchaSolveMethod(if (wbvManualMode) "manual" else "auto")
+                                            }
+                                        }
+                                        ProtocolChip("RJS", !useWVCaptcha, enabled = !tunnelRunning, isError = false) {
+                                            useWVCaptcha = false
+                                            isManualMode = false
+                                            scope.launch {
+                                                settingsStore.saveCaptchaMode("rjs")
                                                 settingsStore.saveCaptchaSolveMethod("auto")
-                                            } else {
-                                                val mode = if (useWVCaptcha) "wv" else "rjs"
-                                                settingsStore.saveCaptchaMode(mode)
-                                                settingsStore.saveCaptchaSolveMethod(if (mode == "wv" && isManualMode) "manual" else "auto")
                                             }
                                         }
                                     }
+                                }
+
+                                
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(vertical = 4.dp),
+                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
                                 )
-                            }
 
-                            AnimatedVisibility(
-                                visible = !autoCaptchaEnabled,
-                                enter = fadeIn() + expandVertically(),
-                                exit = fadeOut() + shrinkVertically()
-                            ) {
-                                Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
-                                    
-                                    HorizontalDivider(
-                                        modifier = Modifier.padding(vertical = 4.dp),
-                                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                                
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        "Режим обхода",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Medium,
+                                        modifier = Modifier.weight(1f)
                                     )
-
-                                    
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Text(
-                                            "Метод обхода капчи",
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = FontWeight.Medium,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                            ProtocolChip("WBV", useWVCaptcha, enabled = !tunnelRunning) {
-                                                useWVCaptcha = true
-                                                isManualMode = wbvManualMode
-                                                scope.launch {
-                                                    settingsStore.saveCaptchaMode("wv")
-                                                    settingsStore.saveCaptchaSolveMethod(if (wbvManualMode) "manual" else "auto")
-                                                }
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        if (useWVCaptcha) {
+                                            ProtocolChip(
+                                                "РУЧ",
+                                                isManualMode,
+                                                enabled = !tunnelRunning,
+                                                isError = false
+                                            ) {
+                                                isManualMode = true
+                                                wbvManualMode = true
+                                                scope.launch { settingsStore.saveWbvCaptchaSolveMethod("manual") }
                                             }
-                                            ProtocolChip("RJS", !useWVCaptcha, enabled = !tunnelRunning, isError = false) {
-                                                useWVCaptcha = false
+                                            ProtocolChip(
+                                                "АВТ",
+                                                !isManualMode,
+                                                enabled = !tunnelRunning,
+                                                isError = false
+                                            ) {
                                                 isManualMode = false
-                                                scope.launch {
-                                                    settingsStore.saveCaptchaMode("rjs")
-                                                    settingsStore.saveCaptchaSolveMethod("auto")
-                                                }
+                                                wbvManualMode = false
+                                                scope.launch { settingsStore.saveWbvCaptchaSolveMethod("auto") }
                                             }
-                                        }
-                                    }
-
-                                    
-                                    HorizontalDivider(
-                                        modifier = Modifier.padding(vertical = 4.dp),
-                                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                                    )
-
-                                    
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Text(
-                                            "Режим обхода",
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = FontWeight.Medium,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                            if (useWVCaptcha) {
-                                                ProtocolChip(
-                                                    "РУЧ",
-                                                    isManualMode,
-                                                    enabled = !tunnelRunning,
-                                                    isError = false
-                                                ) {
-                                                    isManualMode = true
-                                                    wbvManualMode = true
-                                                    scope.launch { settingsStore.saveWbvCaptchaSolveMethod("manual") }
-                                                }
-                                                ProtocolChip(
-                                                    "АВТ",
-                                                    !isManualMode,
-                                                    enabled = !tunnelRunning,
-                                                    isError = false
-                                                ) {
-                                                    isManualMode = false
-                                                    wbvManualMode = false
-                                                    scope.launch { settingsStore.saveWbvCaptchaSolveMethod("auto") }
-                                                }
-                                            } else {
-                                                ProtocolChip(
-                                                    "АВТ",
-                                                    selected = true,
-                                                    enabled = false,
-                                                    isError = false
-                                                ) {}
-                                            }
+                                        } else {
+                                            ProtocolChip(
+                                                "АВТ",
+                                                selected = true,
+                                                enabled = false,
+                                                isError = false
+                                            ) {}
                                         }
                                     }
                                 }
                             }
                         }
                     }
+                }
 
-                    HorizontalDivider(
-                        modifier = Modifier.padding(vertical = 4.dp),
-                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 4.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                )
+
+                
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        "Режим ссылки",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f)
                     )
-
-                    
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 8.dp, bottom = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            "Режим ссылки",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Switch(
-                            checked = wdttLinkMode,
-                            onCheckedChange = { enabled ->
-                                scope.launch {
-                                    settingsStore.saveWdttLinkMode(enabled)
+                    Switch(
+                        checked = wdttLinkMode,
+                        onCheckedChange = { enabled ->
+                            scope.launch {
+                                settingsStore.saveWdttLinkMode(enabled)
+                                if (!enabled) {
+                                    configLinks = emptyList()
+                                    selectedConfigLink = null
                                 }
                             }
-                        )
-                    }
+                        }
+                    )
+                }
 
-                    if (wdttLinkMode) {
-                        Column {
-                            var linkText by remember(wdttLink) { mutableStateOf(wdttLink) }
-                            OutlinedTextField(
-                                value = linkText,
-                                onValueChange = {
-                                    val cleaned = it.filter { c -> !c.isWhitespace() }
-                                    linkText = cleaned
-                                    scope.launch { settingsStore.saveWdttLink(cleaned) }
-                                },
-                                label = { Text("Ссылка wdtt://") },
-                                placeholder = { Text("Ссылка wdtt://") },
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(16.dp),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                                )
+                if (wdttLinkMode) {
+                    Column {
+                        // Рамка Конфиги
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            ),
+                            border = BorderStroke(
+                                1.dp,
+                                MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
                             )
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                // Заголовок с кнопкой +
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        "Конфиги",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    IconButton(
+                                        onClick = { showAddConfigDialog = true },
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Add,
+                                            contentDescription = "Добавить конфиг",
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
+
+                                // Список конфигов
+                                if (configs.isEmpty()) {
+                                    Text(
+                                        "Нет конфигов. Нажмите + чтобы добавить",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                        modifier = Modifier.padding(vertical = 8.dp)
+                                    )
+                                } else {
+                                    configs.forEach { config ->
+                                        ConfigItem(
+                                            config = config,
+                                            isSelected = config.toLink() == selectedConfigLink,
+                                            onSelect = {
+                                                selectedConfigLink = config.toLink()
+                                                scope.launch {
+                                                    settingsStore.saveWdttLink(config.toLink())
+                                                }
+                                            },
+                                            onCopy = {
+                                                clipboardManager.setText(AnnotatedString(config.toLink()))
+                                                Toast.makeText(context, "Ссылка скопирована", Toast.LENGTH_SHORT).show()
+                                            }
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
+        }
 
         
         val tunnelSecretsMissing = savedConnectionPassword.isBlank()
@@ -877,95 +1093,213 @@ private fun ProtocolChip(label: String, selected: Boolean, enabled: Boolean = tr
 }
 
 @Composable
-private fun CompactSteppedSlider(
-    value: Float,
-    onValueChange: (Float) -> Unit,
-    valueRange: ClosedFloatingPointRange<Float>,
-    stepSize: Float,
-    enabled: Boolean,
-    modifier: Modifier = Modifier
+private fun ConfigItem(
+    config: Config,
+    isSelected: Boolean,
+    onSelect: () -> Unit,
+    onCopy: () -> Unit
 ) {
-    val activeColor = MaterialTheme.colorScheme.primary.copy(alpha = if (enabled) 1f else 0.38f)
-    val inactiveColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (enabled) 1f else 0.55f)
-    val thumbStrokeColor = MaterialTheme.colorScheme.surface
-    val density = LocalDensity.current
-    val thumbRadiusPx = with(density) { 9.dp.toPx() }
-    val trackWidthPx = with(density) { 5.dp.toPx() }
-
-    fun snap(raw: Float): Float {
-        val min = valueRange.start
-        val max = valueRange.endInclusive
-        val snapped = (((raw - min) / stepSize).roundToInt() * stepSize) + min
-        return snapped.coerceIn(min, max)
-    }
-
-    fun positionToValue(x: Float, width: Float): Float {
-        val left = thumbRadiusPx
-        val right = (width - thumbRadiusPx).coerceAtLeast(left + 1f)
-        val fraction = ((x.coerceIn(left, right) - left) / (right - left)).coerceIn(0f, 1f)
-        return snap(valueRange.start + fraction * (valueRange.endInclusive - valueRange.start))
-    }
-
-    Canvas(
-        modifier = modifier
-            .height(34.dp)
-            .pointerInput(enabled, valueRange, stepSize) {
-                if (!enabled) return@pointerInput
-                detectTapGestures { offset ->
-                    onValueChange(positionToValue(offset.x, size.width.toFloat()))
-                }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = if (isSelected) {
+            MaterialTheme.colorScheme.primaryContainer
+        } else {
+            MaterialTheme.colorScheme.surface
+        },
+        border = BorderStroke(
+            1.dp,
+            if (isSelected) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
             }
-            .pointerInput(enabled, valueRange, stepSize) {
-                if (!enabled) return@pointerInput
-                detectDragGestures { change, _ ->
-                    onValueChange(positionToValue(change.position.x, size.width.toFloat()))
-                }
-            }
+        )
     ) {
-        val centerY = size.height / 2f
-        val left = thumbRadiusPx
-        val right = size.width - thumbRadiusPx
-        val range = (valueRange.endInclusive - valueRange.start).coerceAtLeast(1f)
-        val fraction = ((value - valueRange.start) / range).coerceIn(0f, 1f)
-        val thumbX = left + (right - left) * fraction
-
-        drawLine(
-            color = inactiveColor,
-            start = Offset(left, centerY),
-            end = Offset(right, centerY),
-            strokeWidth = trackWidthPx,
-            cap = StrokeCap.Round
-        )
-        drawLine(
-            color = activeColor,
-            start = Offset(left, centerY),
-            end = Offset(thumbX, centerY),
-            strokeWidth = trackWidthPx,
-            cap = StrokeCap.Round
-        )
-
-        val tickCount = (((valueRange.endInclusive - valueRange.start) / stepSize).roundToInt()).coerceAtLeast(1)
-        repeat(tickCount + 1) { index ->
-            val tickFraction = index / tickCount.toFloat()
-            val tickX = left + (right - left) * tickFraction
-            drawCircle(
-                color = if (tickX <= thumbX) activeColor else inactiveColor,
-                radius = 2.dp.toPx(),
-                center = Offset(tickX, centerY)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onSelect() }
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = config.displayName,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                color = if (isSelected) {
+                    MaterialTheme.colorScheme.onPrimaryContainer
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+                modifier = Modifier.weight(1f)
             )
+            IconButton(
+                onClick = onCopy,
+                modifier = Modifier.size(32.dp)
+            ) {
+                Icon(
+                    Icons.Default.ContentCopy,
+                    contentDescription = "Копировать",
+                    tint = if (isSelected) {
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    modifier = Modifier.size(18.dp)
+                )
+            }
         }
+    }
+}
 
-        drawCircle(
-            color = activeColor,
-            radius = thumbRadiusPx,
-            center = Offset(thumbX, centerY)
-        )
-        drawCircle(
-            color = thumbStrokeColor,
-            radius = thumbRadiusPx,
-            center = Offset(thumbX, centerY),
-            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx())
-        )
+@Composable
+private fun AddConfigDialog(
+    onDismiss: () -> Unit,
+    onAddManual: () -> Unit,
+    onAddFromClipboard: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("Импорт конфига")
+        },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    "Выберите способ импорта:",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        },
+        confirmButton = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                TextButton(
+                    onClick = onAddManual,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Ручной ввод")
+                }
+                TextButton(
+                    onClick = onAddFromClipboard,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Из буфера")
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Отмена")
+            }
+        }
+    )
+}
+
+@Composable
+private fun ManualInputDialog(
+    onDismiss: () -> Unit,
+    onAdd: (link: String) -> Unit
+) {
+    var linkInput by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("Ручной ввод конфига")
+        },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    "Введите ссылку в формате:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    "wdtt://IP:DTLS:WG:PORT:PASSWORD:HASH",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Medium
+                )
+                OutlinedTextField(
+                    value = linkInput,
+                    onValueChange = { linkInput = it },
+                    label = { Text("Ссылка wdtt://") },
+                    placeholder = { Text("wdtt://1.2.3.4:56000:56001:9000:pass:hash") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
+                    )
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onAdd(linkInput)
+                }
+            ) {
+                Text("Добавить")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Отмена")
+            }
+        }
+    )
+}
+
+// Класс для хранения конфига - без Parcelize, просто data class
+data class Config(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val ip: String,
+    val port: Int,
+    val password: String,
+    val hash: String = "",
+    val dtlsPort: Int = 56000,
+    val wgPort: Int = 56001,
+    val localPort: Int = 9000
+) {
+    val displayName: String
+        get() = "$ip:$port"
+
+    fun toLink(): String {
+        return "wdtt://$ip:$dtlsPort:$wgPort:$localPort:$password:$hash"
+    }
+
+    companion object {
+        fun fromLink(link: String): Config? {
+            if (!link.trim().startsWith("wdtt://")) return null
+            val clean = link.trim().removePrefix("wdtt://")
+            val parts = clean.split(":")
+            if (parts.size < 6) return null
+            
+            return try {
+                Config(
+                    ip = parts[0],
+                    port = parts[3].toIntOrNull() ?: 9000,
+                    password = parts[4],
+                    hash = parts.getOrElse(5) { "" },
+                    dtlsPort = parts[1].toIntOrNull() ?: 56000,
+                    wgPort = parts[2].toIntOrNull() ?: 56001,
+                    localPort = parts[3].toIntOrNull() ?: 9000
+                )
+            } catch (_: Exception) {
+                null
+            }
+        }
     }
 }
 
@@ -973,13 +1307,13 @@ private fun CompactSteppedSlider(
  * Округляет значение до ближайшего кратного группы.
  */
 private fun roundToGroup(value: Float, groupSize: Float): Float {
+    if (groupSize <= 0) return value.coerceAtLeast(1f)
     val groups = (value / groupSize).toInt()
     val remainder = value % groupSize
-    return if (remainder >= groupSize / 2f) {
+    val rounded = if (remainder >= groupSize / 2f) {
         (groups + 1) * groupSize
     } else {
         groups * groupSize
     }
+    return rounded.coerceAtLeast(1f)
 }
-
-

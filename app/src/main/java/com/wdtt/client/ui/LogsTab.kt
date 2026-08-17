@@ -15,6 +15,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -30,6 +32,8 @@ import com.wdtt.client.LogEntry
 import com.wdtt.client.TunnelManager
 import com.wdtt.client.WDTTColors
 import com.wdtt.client.SettingsStore
+import com.wdtt.client.SystemStats
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -41,6 +45,20 @@ fun LogsTab() {
     val scope = rememberCoroutineScope()
     val currentLogs by TunnelManager.logs.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
+    
+    // Статистика системы
+    val cpuUsage by SystemStats.cpuUsage.collectAsState()
+    val ramUsage by SystemStats.ramUsage.collectAsState()
+    val ramTotal by SystemStats.ramTotal.collectAsState()
+    val ramUsed by SystemStats.ramUsed.collectAsState()
+
+    // Обновляем статистику каждую секунду
+    LaunchedEffect(Unit) {
+        while (true) {
+            SystemStats.updateStats(context)
+            delay(1000)
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         
@@ -67,6 +85,113 @@ fun LogsTab() {
                 }) {
                     Icon(Icons.Default.ContentCopy, contentDescription = "Copy", tint = MaterialTheme.colorScheme.primary)
                 }
+            }
+        }
+
+        // Блок статистики
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            ),
+            border = androidx.compose.foundation.BorderStroke(
+                1.dp,
+                MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+            )
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    "📊 Статистика системы",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                
+                // CPU
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Default.Memory,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = if (cpuUsage > 70) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "CPU:",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        String.format("%.1f%%", cpuUsage),
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = if (cpuUsage > 70) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                    )
+                }
+                
+                // CPU Progress
+                LinearProgressIndicator(
+                    progress = { (cpuUsage / 100f).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().height(4.dp),
+                    color = when {
+                        cpuUsage > 70 -> MaterialTheme.colorScheme.error
+                        cpuUsage > 50 -> MaterialTheme.colorScheme.tertiary
+                        else -> MaterialTheme.colorScheme.primary
+                    },
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+                
+                Spacer(Modifier.height(4.dp))
+                
+                // RAM
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Default.Storage,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = if (ramUsage > 80) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "RAM:",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        "${formatBytes(ramUsed)} / ${formatBytes(ramTotal)} (${String.format("%.1f%%", ramUsage)})",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = if (ramUsage > 80) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                    )
+                }
+                
+                // RAM Progress
+                LinearProgressIndicator(
+                    progress = { (ramUsage / 100f).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().height(4.dp),
+                    color = when {
+                        ramUsage > 80 -> MaterialTheme.colorScheme.error
+                        ramUsage > 60 -> MaterialTheme.colorScheme.tertiary
+                        else -> MaterialTheme.colorScheme.primary
+                    },
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant
+                )
             }
         }
 
@@ -180,5 +305,14 @@ fun LogLine(entry: LogEntry) {
             lineHeight = 18.sp,
             modifier = Modifier.weight(1f)
         )
+    }
+}
+
+private fun formatBytes(bytes: Long): String {
+    return when {
+        bytes >= 1_073_741_824 -> String.format("%.1f GB", bytes / 1_073_741_824.0)
+        bytes >= 1_048_576 -> String.format("%.1f MB", bytes / 1_048_576.0)
+        bytes >= 1024 -> String.format("%.1f KB", bytes / 1024.0)
+        else -> "$bytes B"
     }
 }

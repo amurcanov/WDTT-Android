@@ -60,10 +60,14 @@ fun DeployTab() {
     val savedIp by settingsStore.deployIp.collectAsStateWithLifecycle(initialValue = "")
     val savedLogin by settingsStore.deployLogin.collectAsStateWithLifecycle(initialValue = "")
     val savedPassword by settingsStore.deployPassword.collectAsStateWithLifecycle(initialValue = "")
+    val savedUseSshKey by settingsStore.useSshKey.collectAsStateWithLifecycle(initialValue = false)
+    val savedSshPrivateKey by settingsStore.sshPrivateKey.collectAsStateWithLifecycle(initialValue = "")
 
     var ip by remember { mutableStateOf("") }
     var login by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    var useSshKey by remember { mutableStateOf(false) }
+    var sshPrivateKey by remember { mutableStateOf("") }
 
     val savedDns1 by settingsStore.deployDns1.collectAsStateWithLifecycle(initialValue = "1.1.1.1")
     val savedDns2 by settingsStore.deployDns2.collectAsStateWithLifecycle(initialValue = "1.0.0.1")
@@ -101,6 +105,8 @@ fun DeployTab() {
     LaunchedEffect(savedIp) { ip = savedIp }
     LaunchedEffect(savedLogin) { login = savedLogin }
     LaunchedEffect(savedPassword) { password = savedPassword }
+    LaunchedEffect(savedUseSshKey) { useSshKey = savedUseSshKey }
+    LaunchedEffect(savedSshPrivateKey) { sshPrivateKey = savedSshPrivateKey }
     LaunchedEffect(savedDns1) { dns1 = savedDns1 }
     LaunchedEffect(savedDns2) { dns2 = savedDns2 }
     val animatedProgress by animateFloatAsState(
@@ -155,6 +161,37 @@ fun DeployTab() {
                     shape = RoundedCornerShape(16.dp),
                     enabled = !isDeploying,
                 )
+                
+                // Переключатель использования SSH ключа
+                Row(
+                    modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "SSH ключ",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(end = 4.dp)
+                    )
+                    Switch(
+                        checked = useSshKey,
+                        enabled = !isDeploying,
+                        onCheckedChange = { enabled ->
+                            useSshKey = enabled
+                            scope.launch { settingsStore.saveUseSshKey(enabled) }
+                            if (enabled) {
+                                // Если включили ключ - очищаем пароль
+                                password = ""
+                                scope.launch { settingsStore.saveDeploy(ip, login, "", savedSshPort, dns1, dns2) }
+                            }
+                        }
+                    )
+                }
+            }
+
+            // Поле пароля или SSH ключа
+            if (!useSshKey) {
                 OutlinedTextField(
                     value = password,
                     onValueChange = {
@@ -164,7 +201,21 @@ fun DeployTab() {
                     label = { Text("Пароль SSH") },
                     placeholder = { Text("password") },
                     singleLine = true,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    enabled = !isDeploying,
+                )
+            } else {
+                OutlinedTextField(
+                    value = sshPrivateKey,
+                    onValueChange = {
+                        sshPrivateKey = it
+                        scope.launch { settingsStore.saveSshPrivateKey(it) }
+                    },
+                    label = { Text("SSH Private Key") },
+                    placeholder = { Text("-----BEGIN RSA PRIVATE KEY-----...") },
+                    singleLine = false,
+                    modifier = Modifier.fillMaxWidth().height(120.dp),
                     shape = RoundedCornerShape(16.dp),
                     enabled = !isDeploying,
                 )
@@ -303,7 +354,14 @@ fun DeployTab() {
         ) {
             Button(
                 onClick = {
-                    if (ip.isBlank() || password.isBlank() || savedMainPass.isBlank()) return@Button
+                    // Валидация в зависимости от метода аутентификации
+                    if (ip.isBlank() || savedMainPass.isBlank()) return@Button
+                    if (useSshKey) {
+                        if (sshPrivateKey.isBlank()) return@Button
+                    } else {
+                        if (password.isBlank()) return@Button
+                    }
+                    
                     val effectiveLogin = if (login.isBlank()) "root" else login
                     val effectiveDtlsPort = if (savedManualPorts) savedServerDtlsPort.coerceIn(1, 65535) else 56000
                     val effectiveWgPort = if (savedManualPorts) savedServerWgPort.coerceIn(1, 65535) else 56001
@@ -317,9 +375,18 @@ fun DeployTab() {
 
                             val success = performDeploy(
                                 context = appContext,
-                                host = ip, user = effectiveLogin, pass = password, port = savedSshPort.toIntOrNull() ?: 22,
-                                mainPass = savedMainPass, adminId = savedAdminId, botToken = savedBotToken,
-                                dtlsPort = effectiveDtlsPort, wgPort = effectiveWgPort, dns1 = dns1, dns2 = dns2,
+                                host = ip, 
+                                user = effectiveLogin, 
+                                pass = if (useSshKey) null else password,
+                                sshKey = if (useSshKey) sshPrivateKey else null,
+                                port = savedSshPort.toIntOrNull() ?: 22,
+                                mainPass = savedMainPass, 
+                                adminId = savedAdminId, 
+                                botToken = savedBotToken,
+                                dtlsPort = effectiveDtlsPort, 
+                                wgPort = effectiveWgPort, 
+                                dns1 = dns1, 
+                                dns2 = dns2,
                                 onProgress = { p, s -> DeployManager.updateProgress(p, s) }
                             )
                             if (success) {
@@ -334,7 +401,10 @@ fun DeployTab() {
                 modifier = Modifier.weight(1f).height(50.dp),
                 shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(contentColor = MaterialTheme.colorScheme.onPrimary),
-                enabled = !isDeploying && ip.isNotBlank() && password.isNotBlank() && savedMainPass.isNotBlank()
+                enabled = !isDeploying && 
+                          ip.isNotBlank() && 
+                          savedMainPass.isNotBlank() &&
+                          if (useSshKey) sshPrivateKey.isNotBlank() else password.isNotBlank()
             ) {
                 if (isDeploying) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), color = MaterialTheme.colorScheme.onPrimary, strokeWidth = 2.dp)
@@ -347,7 +417,12 @@ fun DeployTab() {
 
             Button(
                 onClick = {
-                    if (ip.isBlank() || password.isBlank()) return@Button
+                    if (ip.isBlank()) return@Button
+                    if (useSshKey) {
+                        if (sshPrivateKey.isBlank()) return@Button
+                    } else {
+                        if (password.isBlank()) return@Button
+                    }
                     showUninstallDialog = true
                 },
                 modifier = Modifier.weight(1f).height(50.dp),
@@ -356,7 +431,9 @@ fun DeployTab() {
                     containerColor = MaterialTheme.colorScheme.error,
                     contentColor = MaterialTheme.colorScheme.onError
                 ),
-                enabled = !isDeploying && ip.isNotBlank() && password.isNotBlank()
+                enabled = !isDeploying && 
+                          ip.isNotBlank() &&
+                          if (useSshKey) sshPrivateKey.isNotBlank() else password.isNotBlank()
             ) {
                 Icon(Icons.Default.Delete, null, Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
@@ -376,8 +453,13 @@ fun DeployTab() {
                         try {
                             DeployManager.startDeploy()
                             performUninstall(
-                                host = ip, user = effectiveLogin, pass = password, port = savedSshPort.toIntOrNull() ?: 22,
-                                dtlsPort = effectiveDtlsPort, wgPort = effectiveWgPort,
+                                host = ip, 
+                                user = effectiveLogin, 
+                                pass = if (useSshKey) null else password,
+                                sshKey = if (useSshKey) sshPrivateKey else null,
+                                port = savedSshPort.toIntOrNull() ?: 22,
+                                dtlsPort = effectiveDtlsPort, 
+                                wgPort = effectiveWgPort,
                                 onProgress = { p, s -> DeployManager.updateProgress(p, s) }
                             )
                         } catch (_: Exception) {}
@@ -415,7 +497,7 @@ fun DeployTab() {
     }
 }
 
-private class SSHClient(private val session: Session, private val pass: String) {
+private class SSHClient(private val session: Session, private val pass: String?) {
 
     fun exec(command: String, timeout: Long = CMD_TIMEOUT): String {
         if (!session.isConnected) {
@@ -438,7 +520,7 @@ private class SSHClient(private val session: Session, private val pass: String) 
             val err = channel.errStream
             channel.connect(15000)
 
-            if (cmd.contains("sudo -S")) {
+            if (cmd.contains("sudo -S") && pass != null) {
                 outStream.write("$pass\n".toByteArray())
                 outStream.flush()
             }
@@ -516,17 +598,52 @@ private class SSHClient(private val session: Session, private val pass: String) 
     }
 }
 
-private fun createSSHSession(host: String, user: String, pass: String, port: Int = 22): Session {
+private fun createSSHSession(
+    host: String, 
+    user: String, 
+    pass: String?, 
+    port: Int = 22,
+    privateKey: String? = null
+): Session {
     val jsch = JSch()
     val session = jsch.getSession(user, host, port)
-    session.setPassword(pass)
-    session.setConfig(Properties().apply {
+    
+    // Настройка сессии
+    val config = Properties().apply {
         put("StrictHostKeyChecking", "no")
         put("ServerAliveInterval", "10")
         put("ServerAliveCountMax", "6")
         put("ConnectTimeout", "15000")
-        put("PreferredAuthentications", "password,keyboard-interactive")
-    })
+    }
+    session.setConfig(config)
+    
+    // Если есть приватный ключ - используем его
+    if (privateKey != null && privateKey.isNotBlank()) {
+        try {
+            val tempFile = File.createTempFile("ssh_key", ".pem")
+            tempFile.writeText(privateKey)
+            tempFile.setReadable(true, true) // только для владельца
+            tempFile.deleteOnExit()
+            
+            // Загружаем ключ без пароля (для простоты, можно добавить passphrase позже)
+            jsch.addIdentity(tempFile.absolutePath)
+            session.setConfig(Properties().apply {
+                put("PreferredAuthentications", "publickey")
+            })
+        } catch (e: Exception) {
+            DeployManager.writeError("Failed to load SSH key: ${e.message}")
+            throw e
+        }
+    } else if (pass != null && pass.isNotBlank()) {
+        // Используем пароль
+        session.setPassword(pass)
+        session.setConfig(Properties().apply {
+            put("PreferredAuthentications", "password,keyboard-interactive")
+        })
+    } else {
+        throw IllegalArgumentException("Either password or SSH key must be provided")
+    }
+    
     session.connect(20000)
     return session
 }
@@ -566,15 +683,30 @@ private fun isUnsafeLegacyServerAsset(serverFile: File): Boolean {
 
 private suspend fun performDeploy(
     context: Context,
-    host: String, user: String, pass: String, port: Int,
-    mainPass: String, adminId: String, botToken: String,
-    dtlsPort: Int, wgPort: Int, dns1: String, dns2: String,
+    host: String, 
+    user: String, 
+    pass: String?,
+    sshKey: String?,
+    port: Int,
+    mainPass: String, 
+    adminId: String, 
+    botToken: String,
+    dtlsPort: Int, 
+    wgPort: Int, 
+    dns1: String, 
+    dns2: String,
     onProgress: (Float, String) -> Unit
 ): Boolean = withContext(Dispatchers.IO) {
     var session: Session? = null
     try {
         onProgress(0.02f, "Подключение...")
-        session = createSSHSession(host, user, pass, port)
+        session = createSSHSession(
+            host = host, 
+            user = user, 
+            pass = pass,
+            port = port,
+            privateKey = sshKey
+        )
         DeployManager.activeSession = session
         val ssh = SSHClient(session, pass)
 
@@ -643,14 +775,25 @@ private suspend fun performDeploy(
 }
 
 private suspend fun performUninstall(
-    host: String, user: String, pass: String, port: Int,
-    dtlsPort: Int, wgPort: Int,
+    host: String, 
+    user: String, 
+    pass: String?,
+    sshKey: String?,
+    port: Int,
+    dtlsPort: Int, 
+    wgPort: Int,
     onProgress: (Float, String) -> Unit
 ) = withContext(Dispatchers.IO) {
     var session: Session? = null
     try {
         onProgress(0.05f, "Подключение...")
-        session = createSSHSession(host, user, pass, port)
+        session = createSSHSession(
+            host = host, 
+            user = user, 
+            pass = pass,
+            port = port,
+            privateKey = sshKey
+        )
         DeployManager.activeSession = session
         val ssh = SSHClient(session, pass)
 
@@ -722,4 +865,3 @@ private suspend fun performUninstall(
         DeployManager.activeSession = null
     }
 }
-

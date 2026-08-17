@@ -1,0 +1,323 @@
+name: Build WDTT APKs
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag (optional)'
+        required: false
+        type: string
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - debug
+          - release
+
+# Добавляем разрешения для создания релизов
+permissions:
+  contents: write
+  packages: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  build:
+    name: Build APKs
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 11076708
+
+      - name: Setup Android NDK
+        run: |
+          echo "::group::Install Android NDK"
+          SDK_ROOT=$ANDROID_HOME
+          if [ -z "$SDK_ROOT" ]; then
+            SDK_ROOT=$ANDROID_SDK_ROOT
+          fi
+          if [ -z "$SDK_ROOT" ]; then
+            SDK_ROOT=/usr/local/android-sdk
+          fi
+          echo "SDK_ROOT=$SDK_ROOT" >> $GITHUB_ENV
+          
+          yes | $SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          $SDK_ROOT/cmdline-tools/latest/bin/sdkmanager "ndk;26.1.10909125"
+          echo "ANDROID_NDK_HOME=$SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
+          echo "::endgroup::"
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Setup additional dependencies
+        run: |
+          echo "::group::Install additional dependencies"
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            pkg-config \
+            build-essential \
+            git \
+            wget \
+            curl \
+            tree \
+            apksigner
+          echo "::endgroup::"
+
+      - name: Prepare release keystore and local.properties
+        run: |
+          echo "::group::Prepare release keystore and local.properties"
+          
+          # Удаляем local.properties если существует
+          if [ -f "local.properties" ]; then
+            echo "Removing existing local.properties"
+            rm -f local.properties
+          fi
+          
+          # Создаем release keystore
+          echo "Creating release keystore..."
+          keytool -genkey -v -keystore release.keystore \
+            -alias release-key \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass release123 \
+            -keypass release123 \
+            -dname "CN=WDTT, OU=Development, O=WDTT, L=City, ST=State, C=US"
+          
+          # Создаем local.properties с пустым sdk.dir
+          echo "Creating local.properties..."
+          echo "sdk.dir=" > local.properties
+          echo "KEYSTORE_FILE=$(pwd)/release.keystore" >> local.properties
+          echo "KEYSTORE_PASSWORD=release123" >> local.properties
+          echo "KEY_ALIAS=release-key" >> local.properties
+          echo "KEY_PASSWORD=release123" >> local.properties
+          
+          echo "local.properties created with content:"
+          cat local.properties
+          echo "::endgroup::"
+
+      - name: Cache Gradle
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Cache Go modules
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Make all scripts executable
+        run: |
+          chmod +x scripts/*.sh || true
+          chmod +x scripts/build_go_libs || true
+          chmod +x scripts/build-go-lib.sh || true
+          chmod +x scripts/build_client.sh || true
+          chmod +x scripts/build_apk.sh || true
+          chmod +x scripts/*.bat || true
+          chmod +x gradlew || true
+          echo "All scripts are now executable"
+
+      - name: Build Go libs
+        run: |
+          echo "::group::Build Go libs"
+          if [ -f "scripts/build_go_libs" ]; then
+            ./scripts/build_go_libs
+          else
+            echo "build_go_libs not found, skipping..."
+          fi
+          echo "::endgroup::"
+
+      - name: Build client
+        run: |
+          echo "::group::Build client"
+          if [ -f "scripts/build_client.sh" ]; then
+            ./scripts/build_client.sh
+          else
+            echo "build_client.sh not found, skipping..."
+          fi
+          echo "::endgroup::"
+
+      - name: Build APK with build_apk.sh
+        run: |
+          echo "::group::Build APK with build_apk.sh"
+          
+          BUILD_TYPE="${{ github.event.inputs.build_type }}"
+          if [ -z "$BUILD_TYPE" ]; then
+            BUILD_TYPE="release"
+          fi
+          
+          export BUILD_TYPE=$BUILD_TYPE
+          
+          if [ -f "scripts/build_apk.sh" ]; then
+            ./scripts/build_apk.sh
+          else
+            echo "build_apk.sh not found, using gradle directly"
+            if [ "$BUILD_TYPE" == "release" ]; then
+              ./gradlew :app:assembleRelease
+            else
+              ./gradlew :app:assembleDebug
+            fi
+          fi
+          echo "::endgroup::"
+          
+      - name: Show project tree
+        run: |
+          echo "::group::Project tree"
+          tree -L 3 app/build/outputs || echo "No outputs found"
+          echo "::endgroup::"
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: WDTT-APKs
+          path: |
+            app/build/outputs/apk/**/*.apk
+            !**/*unaligned*.apk
+          if-no-files-found: warn
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    # Создаем релиз только при пуше в main/master или при ручном запуске с указанием тега
+    if: |
+      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '')
+    
+    # Добавляем разрешения для этого job
+    permissions:
+      contents: write
+      packages: write
+      issues: write
+      pull-requests: write
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: |
+          echo "::group::Artifacts"
+          find artifacts -name "*.apk" -type f
+          echo "::endgroup::"
+          
+      - name: Show tree of artifacts
+        run: |
+          echo "::group::Artifacts tree"
+          tree artifacts || ls -la artifacts/
+          echo "::endgroup::"
+
+      - name: Generate release version
+        id: version
+        run: |
+          # Генерируем версию в формате ГГГГ.ММ.ЧЧ.ММ
+          VERSION=$(date +'%Y.%m.%d.%H.%M')
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Generated version: $VERSION"
+          
+          # Если указан release_tag, используем его
+          if [ -n "${{ github.event.inputs.release_tag }}" ]; then
+            echo "TAG=${{ github.event.inputs.release_tag }}" >> $GITHUB_ENV
+            echo "Using custom tag: ${{ github.event.inputs.release_tag }}"
+          else
+            echo "TAG=v$VERSION" >> $GITHUB_ENV
+            echo "Using auto-generated tag: v$VERSION"
+          fi
+
+      - name: Rename APKs with version
+        run: |
+          VERSION=${{ env.VERSION }}
+          echo "Renaming APKs with version: $VERSION"
+          
+          # Находим все APK и переименовываем их
+          find artifacts -name "*.apk" -type f | while read -r apk; do
+            dir=$(dirname "$apk")
+            filename=$(basename "$apk")
+            
+            # Определяем архитектуру из имени файла или папки
+            if [[ "$filename" == *"arm64-v8a"* ]] || [[ "$dir" == *"arm64-v8a"* ]]; then
+              new_name="WDTT-${VERSION}-arm64-v8a.apk"
+            elif [[ "$filename" == *"armeabi-v7a"* ]] || [[ "$dir" == *"armeabi-v7a"* ]]; then
+              new_name="WDTT-${VERSION}-armeabi-v7a.apk"
+            elif [[ "$filename" == *"x86_64"* ]] || [[ "$dir" == *"x86_64"* ]]; then
+              new_name="WDTT-${VERSION}-x86_64.apk"
+            elif [[ "$filename" == *"universal"* ]] || [[ "$dir" == *"universal"* ]]; then
+              new_name="WDTT-${VERSION}-universal.apk"
+            else
+              # Если не можем определить архитектуру, добавляем суффикс
+              base="${filename%.apk}"
+              new_name="WDTT-${VERSION}-${base}.apk"
+            fi
+            
+            echo "Renaming: $filename -> $new_name"
+            mv "$apk" "$dir/$new_name"
+          done
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: "WDTT v${{ env.VERSION }}"
+          body: |
+            ## WDTT Release v${{ env.VERSION }}
+            
+            ### 📱 APK Files
+            - **WDTT-${{ env.VERSION }}-arm64-v8a.apk** - For 64-bit ARM devices
+            - **WDTT-${{ env.VERSION }}-armeabi-v7a.apk** - For 32-bit ARM devices  
+            - **WDTT-${{ env.VERSION }}-x86_64.apk** - For 64-bit x86 devices
+            - **WDTT-${{ env.VERSION }}-universal.apk** - Universal build (all architectures)
+            
+            ### 🔧 Build Information
+            - **Version:** ${{ env.VERSION }}
+            - **Type:** ${{ github.event.inputs.build_type || 'release' }}
+            
+            ### 📥 Installation
+            Download the APK for your device architecture and install it.
+            
+            > **Note:** Make sure to enable "Install from unknown sources" in your device settings.
+          draft: false
+          prerelease: false
+          files: |
+            artifacts/**/*.apk
+          fail_on_unmatched_files: true
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
